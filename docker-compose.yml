@@ -1,6 +1,6 @@
 services:
   app:
-    image: 52token/infinite-canvas:latest
+    image: ghcr.io/hxly520/infinite-canvas:latest
     container_name: 52token-image-workbench
     ports:
       - "127.0.0.1:15731:3000"

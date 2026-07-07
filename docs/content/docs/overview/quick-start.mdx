@@ -29,7 +29,14 @@ http://localhost:3000
 
 ## Docker 启动
 
-如果你需要基于当前源码构建镜像：
+生产环境使用已发布镜像：
+
+```bash
+docker compose pull
+docker compose up -d
+```
+
+本地开发如果需要基于当前源码构建镜像：
 
 ```bash
 docker compose -f docker-compose.local.yml up -d --build

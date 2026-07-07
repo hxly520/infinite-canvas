@@ -9,9 +9,12 @@ description: 使用 Docker Compose 部署无限画布
 
 ## 52Token 生图工作台
 
+生产服务器只拉取 GitHub Actions 发布到 GHCR 的镜像，不在服务器上构建：
+
 ```bash
 cd /home/api/sub2api-deploy/images
-docker compose -f docker-compose.local.yml up -d --build
+docker compose pull
+docker compose up -d
 ```
 
 默认容器只监听本机：
@@ -31,12 +34,12 @@ docker compose -f docker-compose.local.yml up -d --build
 
 用户首次使用时只需要在右上角配置中填入自己的分组 API Key，并选择对应生图模型。
 
-## 使用发布镜像
+## 本地源码构建
 
-如果已经有发布镜像，也可以直接运行：
+如果是在本机开发或测试当前源码，可以使用本地构建文件：
 
 ```bash
-docker compose up -d
+docker compose -f docker-compose.local.yml up -d --build
 ```
 
 ## 文档站镜像

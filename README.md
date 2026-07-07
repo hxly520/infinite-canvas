@@ -52,13 +52,20 @@ bun install
 bun run dev
 ```
 
-Docker 运行：
+生产 Docker 运行：
+
+```bash
+docker compose pull
+docker compose up -d
+```
+
+运行后默认绑定 `127.0.0.1:15731`，公网访问由 Nginx 域名配置代理。
+
+本地开发如果需要基于当前源码临时构建，可使用：
 
 ```bash
 docker compose -f docker-compose.local.yml up -d --build
 ```
-
-运行后默认绑定 `127.0.0.1:15731`，公网访问由 Nginx 域名配置代理。
 
 首次打开后进入右上角配置，填入自己的分组 `API Key`。默认渠道已预置 `https://image.52token.org`，支持 Image2 的 OpenAI Images API 和 Gemini banana 的 `v1beta` 生图接口。
 
