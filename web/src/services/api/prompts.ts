@@ -33,6 +33,7 @@ const awesomeGpt4oImagePromptsBase = "https://raw.githubusercontent.com/ImgEdify
 const youMindGptImage2RawBase = "https://raw.githubusercontent.com/YouMind-OpenLab/awesome-gpt-image-2/main";
 const youMindNanoBananaProRawBase = "https://raw.githubusercontent.com/YouMind-OpenLab/awesome-nano-banana-pro-prompts/main";
 const davidWuGptImage2RawBase = "https://raw.githubusercontent.com/davidwuw0811-boop/awesome-gpt-image2-prompts/main";
+const xianyuGptImage2RawBase = "https://raw.githubusercontent.com/xianyu110/awesome-gptimage2/main";
 const cacheTtlMs = 1000 * 60 * 60;
 const promptCacheKey = "third-party-prompts";
 const promptCacheStore = localforage.createInstance({ name: "infinite-canvas", storeName: "prompt_cache" });
@@ -43,6 +44,7 @@ const categories: PromptCategory[] = [
     { category: "youmind-gpt-image-2", githubUrl: "https://github.com/YouMind-OpenLab/awesome-gpt-image-2", build: () => buildYouMindPrompts(youMindGptImage2RawBase, "youmind-gpt-image-2", "gpt-image-2") },
     { category: "youmind-nano-banana-pro", githubUrl: "https://github.com/YouMind-OpenLab/awesome-nano-banana-pro-prompts", build: () => buildYouMindPrompts(youMindNanoBananaProRawBase, "youmind-nano-banana-pro", "nano-banana-pro") },
     { category: "davidwu-gpt-image2-prompts", githubUrl: "https://github.com/davidwuw0811-boop/awesome-gpt-image2-prompts", build: buildDavidWuGptImage2Prompts },
+    { category: "xianyu-gptimage2-latest", githubUrl: "https://github.com/xianyu110/awesome-gptimage2", build: buildXianyuGptImage2Prompts },
 ];
 
 let loadingPrompts: Promise<Prompt[]> | null = null;
@@ -84,7 +86,7 @@ async function loadPrompts() {
             }
         }),
     );
-    const items = settled.flat();
+    const items = cleanPromptItems(settled.flat());
     await promptCacheStore.setItem(promptCacheKey, { items, fetchedAt: Date.now() });
     return items;
 }
@@ -154,6 +156,40 @@ async function buildDavidWuGptImage2Prompts() {
         .filter((item): item is Omit<Prompt, "category" | "githubUrl"> => Boolean(item));
 }
 
+async function buildXianyuGptImage2Prompts() {
+    const data = await fetchJson<{
+        dates?: Array<{
+            date?: string;
+            items?: Array<{
+                url?: string;
+                source_url?: string;
+                author?: string;
+                created_at?: string;
+                prompt?: string;
+                reason?: string;
+                primary_image_url?: string;
+                image_urls?: string[];
+                like_count?: number;
+                engagement_score?: number;
+            }>;
+        }>;
+    }>(xianyuGptImage2RawBase, "data/latest-prompts.json");
+    return (data.dates || [])
+        .flatMap((group, groupIndex) =>
+            (group.items || []).map((item, index) => {
+                const prompt = (item.prompt || "").trim();
+                const image = firstImage([item.primary_image_url, ...(item.image_urls || [])]);
+                if (!prompt || !image) return null;
+                const title = promptTitle(item.reason || item.author || "GPT Image 2 灵感", prompt);
+                const date = item.created_at || group.date || "";
+                const tags = splitTags(["gpt-image-2", item.author, item.engagement_score ? "高互动" : ""].filter(Boolean).join("/"), /\//);
+                const preview = [item.reason, item.source_url || item.url, `![](${image})`].filter(Boolean).join("\n\n");
+                return { ...defaultPrompt(`xianyu-gptimage2-latest-${leftPad(groupIndex + 1)}-${leftPad(index + 1)}`, title, prompt, image, tags, preview), createdAt: date, updatedAt: date };
+            }),
+        )
+        .filter((item): item is Omit<Prompt, "category" | "githubUrl"> => Boolean(item));
+}
+
 function defaultPrompt(id: string, title: string, prompt: string, coverUrl: string, tags: string[], preview: string): Omit<Prompt, "category" | "githubUrl"> {
     return { id, title, coverUrl, prompt, tags, preview, createdAt: "", updatedAt: "" };
 }
@@ -188,6 +224,10 @@ function firstMatch(value: string, pattern: RegExp) {
 
 function extractMarkdownImages(baseUrl: string, markdown: string) {
     return Array.from(markdown.matchAll(/!\[[^\]]*]\(([^)]+)\)/g), (match) => absoluteImage(baseUrl, match[1])).filter(Boolean);
+}
+
+function firstImage(images: Array<string | undefined>) {
+    return images.map((image) => image?.trim() || "").find(isVisibleImageUrl) || "";
 }
 
 function absoluteImage(baseUrl: string, image: string) {
@@ -228,6 +268,28 @@ function markdownPreview(images: string[]) {
 
 function collectTags(items: Prompt[]) {
     return Array.from(new Set(items.flatMap((item) => item.tags).filter(Boolean)));
+}
+
+function cleanPromptItems(items: Prompt[]) {
+    const seen = new Set<string>();
+    return items.filter((item) => {
+        const prompt = item.prompt.trim();
+        const coverUrl = item.coverUrl.trim();
+        if (!prompt || !isVisibleImageUrl(coverUrl)) return false;
+        const key = `${item.title.trim().toLowerCase()}\n${prompt.toLowerCase()}`;
+        if (seen.has(key)) return false;
+        seen.add(key);
+        return true;
+    });
+}
+
+function isVisibleImageUrl(value: string) {
+    return /^https?:\/\//i.test(value);
+}
+
+function promptTitle(title: string, prompt: string) {
+    const cleanTitle = title.replace(/^reusable\s+/i, "").trim();
+    return cleanTitle || prompt.slice(0, 32);
 }
 
 function leftPad(value: number) {

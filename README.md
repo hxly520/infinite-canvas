@@ -14,7 +14,7 @@
   <a href="https://reactrouter.com/"><img src="https://img.shields.io/badge/React_Router-7-ca4245?style=flat-square&logo=reactrouter&logoColor=white" alt="React Router"></a>
 </p>
 
-无限画布是一款面向图片创作的开源工作台。它把画布编排、AI 图片生成、参考图编辑、对话助手、提示词库和素材沉淀放在同一个界面里，适合用来探索视觉方案并连续迭代图片结果。
+52Token 生图工作台基于无限画布二开。它把画布编排、AI 图片生成、参考图编辑、对话助手、提示词库和素材沉淀放在同一个界面里，适合用来探索视觉方案并连续迭代图片结果。
 
 > [!CAUTION]
 > 项目目前处于开发阶段，不保证历史数据兼容。各种数据库结构和存储格式都可能直接调整，欢迎关注后续更新，当前更适合个人/本地部署，不建议直接公网多人共用。
@@ -55,13 +55,12 @@ bun run dev
 Docker 运行：
 
 ```bash
-docker build -t infinite-canvas .
-docker run --rm -p 3000:3000 infinite-canvas
+docker compose -f docker-compose.local.yml up -d --build
 ```
 
-运行后默认端口3000，可访问 `http://localhost:3000`。
+运行后默认绑定 `127.0.0.1:15731`，公网访问由 Nginx 域名配置代理。
 
-首次打开后进入右上角配置，填入自己的 OpenAI 兼容 `Base URL` 和 `API Key`。
+首次打开后进入右上角配置，填入自己的分组 `API Key`。默认渠道已预置 `https://image.52token.org`，支持 Image2 的 OpenAI Images API 和 Gemini banana 的 `v1beta` 生图接口。
 
 ## New API 自动配置
 

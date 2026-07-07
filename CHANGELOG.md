@@ -2,6 +2,9 @@
 
 ## Unreleased
 
++ [调整] 52Token 生图工作台默认预置 `https://image.52token.org` 的 Image2 与 Gemini 生图渠道。
++ [调整] Docker Compose 默认绑定 `127.0.0.1:15731`，便于由 Nginx 域名配置统一反代。
++ [优化] 提示词库新增 `xianyu110/awesome-gptimage2` 来源，并过滤空提示词、无图和重复条目。
 + [新增] 新增Codex App插件支持。
 + [修复] 修复前端 TypeScript 构建报错。
 + [调整] Docker 运行镜像改为 nginx 静态托管。

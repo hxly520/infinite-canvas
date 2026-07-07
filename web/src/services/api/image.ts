@@ -750,7 +750,7 @@ export async function fetchChannelModels(channel: ModelChannel) {
 }
 
 const defaultGeminiConfig: Pick<AiConfig, "baseUrl" | "apiKey" | "apiFormat" | "model" | "systemPrompt"> = {
-    baseUrl: "https://generativelanguage.googleapis.com",
+    baseUrl: "https://image.52token.org",
     apiKey: "",
     apiFormat: "gemini",
     model: "",

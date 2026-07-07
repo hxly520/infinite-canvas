@@ -1,7 +1,7 @@
 services:
   app:
-    image: ghcr.io/basketikun/infinite-canvas:latest
-    container_name: infinite-canvas
+    image: 52token/infinite-canvas:latest
+    container_name: 52token-image-workbench
     ports:
-      - "3000:3000"
+      - "127.0.0.1:15731:3000"
     restart: unless-stopped

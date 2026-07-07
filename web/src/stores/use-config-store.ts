@@ -56,8 +56,13 @@ export type WebdavSyncConfig = {
 export const CONFIG_STORE_KEY = "infinite-canvas:ai_config_store";
 export type ModelCapability = "image" | "video" | "text" | "audio";
 const CHANNEL_MODEL_SEPARATOR = "::";
-const OPENAI_BASE_URL = "https://api.openai.com";
-const GEMINI_BASE_URL = "https://generativelanguage.googleapis.com";
+const TOKEN52_IMAGE_BASE_URL = "https://image.52token.org";
+const OPENAI_BASE_URL = TOKEN52_IMAGE_BASE_URL;
+const GEMINI_BASE_URL = TOKEN52_IMAGE_BASE_URL;
+const IMAGE2_CHANNEL_ID = "52token-image2";
+const GEMINI_IMAGE_CHANNEL_ID = "52token-gemini-image";
+const IMAGE2_MODEL = "gpt-image-2";
+const GEMINI_IMAGE_MODELS = ["gemini-3.1-flash-image-preview", "gemini-3-pro-image-preview", "banana-2", "banana-pro"];
 
 export const defaultConfig: AiConfig = {
     channelMode: "local",
@@ -66,19 +71,27 @@ export const defaultConfig: AiConfig = {
     apiFormat: "openai",
     channels: [
         {
-            id: "default",
-            name: "默认渠道",
+            id: IMAGE2_CHANNEL_ID,
+            name: "52Token Image2",
             baseUrl: OPENAI_BASE_URL,
             apiKey: "",
             apiFormat: "openai",
-            models: ["gpt-image-2", "grok-imagine-video", "gpt-5.5", "gpt-4o-mini-tts"],
+            models: [IMAGE2_MODEL],
+        },
+        {
+            id: GEMINI_IMAGE_CHANNEL_ID,
+            name: "52Token Gemini 生图",
+            baseUrl: GEMINI_BASE_URL,
+            apiKey: "",
+            apiFormat: "gemini",
+            models: GEMINI_IMAGE_MODELS,
         },
     ],
-    model: "default::gpt-image-2",
-    imageModel: "default::gpt-image-2",
-    videoModel: "default::grok-imagine-video",
-    textModel: "default::gpt-5.5",
-    audioModel: "default::gpt-4o-mini-tts",
+    model: `${IMAGE2_CHANNEL_ID}::${IMAGE2_MODEL}`,
+    imageModel: `${IMAGE2_CHANNEL_ID}::${IMAGE2_MODEL}`,
+    videoModel: "",
+    textModel: "",
+    audioModel: "",
     audioVoice: "alloy",
     audioFormat: "mp3",
     audioSpeed: "1",
@@ -88,11 +101,11 @@ export const defaultConfig: AiConfig = {
     videoGenerateAudio: "true",
     videoWatermark: "false",
     systemPrompt: "",
-    models: ["default::gpt-image-2", "default::grok-imagine-video", "default::gpt-5.5", "default::gpt-4o-mini-tts"],
-    imageModels: ["default::gpt-image-2"],
-    videoModels: ["default::grok-imagine-video"],
-    textModels: ["default::gpt-5.5"],
-    audioModels: ["default::gpt-4o-mini-tts"],
+    models: [`${IMAGE2_CHANNEL_ID}::${IMAGE2_MODEL}`, ...GEMINI_IMAGE_MODELS.map((model) => `${GEMINI_IMAGE_CHANNEL_ID}::${model}`)],
+    imageModels: [`${IMAGE2_CHANNEL_ID}::${IMAGE2_MODEL}`, ...GEMINI_IMAGE_MODELS.map((model) => `${GEMINI_IMAGE_CHANNEL_ID}::${model}`)],
+    videoModels: [],
+    textModels: [],
+    audioModels: [],
     quality: "auto",
     size: "1:1",
     count: "1",
@@ -127,7 +140,7 @@ function isVideoModelName(model: string) {
 
 function isImageModelName(model: string) {
     const value = modelOptionName(model).toLowerCase();
-    return !isVideoModelName(model) && !isAudioModelName(model) && (value.includes("seedream") || value.includes("gpt-image") || value.includes("image") || value.includes("dall-e") || value.includes("dalle") || value.includes("imagen") || value.includes("flux") || value.includes("sdxl") || value.includes("stable-diffusion") || value.includes("midjourney"));
+    return !isVideoModelName(model) && !isAudioModelName(model) && (value.includes("seedream") || value.includes("gpt-image") || value.includes("image") || value.includes("banana") || value.includes("dall-e") || value.includes("dalle") || value.includes("imagen") || value.includes("flux") || value.includes("sdxl") || value.includes("stable-diffusion") || value.includes("midjourney"));
 }
 
 function isAudioModelName(model: string) {
@@ -212,8 +225,8 @@ export const useConfigStore = create<ConfigStore>()(
                         channels,
                         models,
                         imageModel: normalizeModelOptionValue(config.imageModel || config.model, channels),
-                        videoModel: normalizeModelOptionValue(config.videoModel || "grok-imagine-video", channels),
-                        textModel: normalizeModelOptionValue(config.textModel || config.model, channels),
+                        videoModel: normalizeModelOptionValue(config.videoModel || defaultConfig.videoModel, channels),
+                        textModel: normalizeModelOptionValue(config.textModel || defaultConfig.textModel, channels),
                         audioModel: normalizeModelOptionValue(config.audioModel || defaultConfig.audioModel, channels),
                         audioVoice: config.audioVoice || defaultConfig.audioVoice,
                         audioFormat: config.audioFormat || defaultConfig.audioFormat,

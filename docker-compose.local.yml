@@ -1,9 +1,10 @@
 services:
   app:
-    image: infinite-canvas:local
+    image: 52token/infinite-canvas:local
+    container_name: 52token-image-workbench
     build:
       context: .
       dockerfile: Dockerfile
     ports:
-      - "3000:3000"
+      - "127.0.0.1:15731:3000"
     restart: unless-stopped

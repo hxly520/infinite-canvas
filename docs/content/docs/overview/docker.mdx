@@ -7,26 +7,36 @@ description: 使用 Docker Compose 部署无限画布
 
 如果你希望在自己的机器或服务器上运行项目，可以直接使用 Docker Compose。
 
-## 使用发布镜像
+## 52Token 生图工作台
 
 ```bash
-git clone git@github.com:basketikun/infinite-canvas.git
-cd infinite-canvas
-docker compose up -d
+cd /home/api/sub2api-deploy/images
+docker compose -f docker-compose.local.yml up -d --build
 ```
 
-启动后访问：
+默认容器只监听本机：
 
 ```text
-http://localhost:3000
+127.0.0.1:15731 -> container:3000
 ```
 
-## 本地构建镜像
+公网访问由 Nginx 域名配置代理到 `127.0.0.1:15731`。`/v1/images/*` 和 `/v1beta/models/*` 应继续代理到 sub2api，不能被工作台容器接管。
 
-如果需要基于当前源码构建镜像：
+工作台默认预置两个渠道：
+
+| 渠道 | 调用格式 | Base URL | 默认模型 |
+| --- | --- | --- | --- |
+| 52Token Image2 | OpenAI | `https://image.52token.org` | `gpt-image-2` |
+| 52Token Gemini 生图 | Gemini | `https://image.52token.org` | `gemini-3.1-flash-image-preview`、`gemini-3-pro-image-preview`、`banana-2`、`banana-pro` |
+
+用户首次使用时只需要在右上角配置中填入自己的分组 API Key，并选择对应生图模型。
+
+## 使用发布镜像
+
+如果已经有发布镜像，也可以直接运行：
 
 ```bash
-docker compose -f docker-compose.local.yml up -d --build
+docker compose up -d
 ```
 
 ## 文档站镜像
@@ -49,4 +59,4 @@ docker compose -f docker-compose.local.yml up -d --build
 
 ## 数据说明
 
-当前主应用镜像只启动 Next.js。画布、我的素材、生成记录和 AI API Key 默认保存在浏览器本地；第三方提示词由浏览器前端直连拉取，不需要额外挂载数据目录。
+当前主应用镜像只启动 nginx 静态前端。画布、我的素材、生成记录和 AI API Key 默认保存在浏览器本地；第三方提示词由浏览器前端直连拉取并缓存到 IndexedDB，不需要额外挂载数据目录。
