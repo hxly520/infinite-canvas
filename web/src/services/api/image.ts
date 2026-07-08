@@ -72,6 +72,18 @@ type ImageApiResponse = {
     code?: number;
     msg?: string;
 };
+type ImageTaskResponse = ImageApiResponse & {
+    id?: string;
+    task_id?: string;
+    taskId?: string;
+    status?: string;
+    progress?: number | string;
+    object?: string;
+    model?: string;
+    created_at?: number;
+    result?: ImageApiResponse;
+    response?: ImageApiResponse;
+};
 type GeminiPart = {
     text?: string;
     inlineData?: { mimeType?: string; data?: string };
@@ -111,6 +123,8 @@ const IMAGE_MAX_PIXELS = 8294400;
 const IMAGE_MAX_EDGE = 3840;
 const IMAGE_MAX_RATIO = 3;
 const IMAGE_OUTPUT_FORMAT = "png";
+const DEFAULT_IMAGE_POLL_INTERVAL_MS = 2500;
+const DEFAULT_IMAGE_POLL_TIMEOUT_MS = 600000;
 
 function normalizeQuality(quality: string) {
     const value = quality.trim().toLowerCase();
@@ -194,6 +208,9 @@ function parseImagePayload(payload: ImageApiResponse) {
     if (typeof payload.code === "number" && payload.code !== 0) {
         throw new Error(payload.msg || "请求失败");
     }
+    if (payload.error?.message) {
+        throw new Error(payload.error.message);
+    }
     const images =
         payload.data
             ?.map(resolveImageDataUrl)
@@ -205,6 +222,69 @@ function parseImagePayload(payload: ImageApiResponse) {
     }
 
     return images;
+}
+
+function imagePayloadHasImages(payload: ImageApiResponse) {
+    return Boolean(payload.data?.some((item) => resolveImageDataUrl(item)));
+}
+
+function resolveImageTaskId(payload: ImageTaskResponse) {
+    return stringValue(payload.id) || stringValue(payload.task_id) || stringValue(payload.taskId);
+}
+
+function normalizeImageTaskStatus(status: unknown) {
+    return String(status || "").trim().toLowerCase();
+}
+
+function isImageTaskCompleted(payload: ImageTaskResponse) {
+    const status = normalizeImageTaskStatus(payload.status);
+    return imagePayloadHasImages(payload) || ["completed", "succeeded", "success", "finished"].includes(status);
+}
+
+function isImageTaskFailed(payload: ImageTaskResponse) {
+    return ["failed", "error", "cancelled", "canceled", "expired"].includes(normalizeImageTaskStatus(payload.status));
+}
+
+function resolveImageTaskPayload(payload: ImageTaskResponse): ImageApiResponse {
+    if (payload.result && imagePayloadHasImages(payload.result)) return payload.result;
+    if (payload.response && imagePayloadHasImages(payload.response)) return payload.response;
+    return payload;
+}
+
+function readImageTaskError(payload: ImageTaskResponse) {
+    return payload.msg || payload.error?.message || `异步生图任务失败：${payload.status || "unknown"}`;
+}
+
+function normalizeImageDispatchMode(value: string | undefined) {
+    return value === "sync" || value === "async" || value === "auto" ? value : "auto";
+}
+
+function normalizeImageResponseFormat(value: string | undefined) {
+    return value === "url" ? "url" : "b64_json";
+}
+
+function normalizeBoundedNumber(value: string | undefined, fallback: number, min: number, max: number) {
+    const parsed = Math.floor(Number(value));
+    if (!Number.isFinite(parsed)) return fallback;
+    return Math.max(min, Math.min(max, parsed));
+}
+
+function delay(ms: number, signal?: AbortSignal) {
+    return new Promise<void>((resolve, reject) => {
+        if (signal?.aborted) {
+            reject(new DOMException("请求已取消", "AbortError"));
+            return;
+        }
+        const timer = window.setTimeout(resolve, ms);
+        signal?.addEventListener(
+            "abort",
+            () => {
+                window.clearTimeout(timer);
+                reject(new DOMException("请求已取消", "AbortError"));
+            },
+            { once: true },
+        );
+    });
 }
 
 function readAxiosError(error: unknown, fallback: string) {
@@ -609,6 +689,104 @@ function parseGeminiImagePayload(payload: GeminiPayload) {
     return images;
 }
 
+function buildOpenAIImageGenerationBody(config: AiConfig, prompt: string, n: number, asyncMode: boolean) {
+    const quality = normalizeQuality(config.quality);
+    const requestSize = resolveRequestSize(quality, config.size);
+    const responseFormat = normalizeImageResponseFormat(config.imageResponseFormat);
+    return {
+        model: config.model,
+        prompt: withSystemPrompt(config, prompt),
+        n,
+        ...(asyncMode ? { async: true } : {}),
+        ...(quality ? { quality } : {}),
+        ...(requestSize ? { size: requestSize } : {}),
+        response_format: responseFormat,
+        ...(responseFormat === "b64_json" ? { output_format: IMAGE_OUTPUT_FORMAT } : {}),
+    };
+}
+
+async function parseOpenAIImageCreatePayload(config: AiConfig, payload: ImageTaskResponse, options?: RequestOptions) {
+    const imagePayload = resolveImageTaskPayload(payload);
+    if (imagePayloadHasImages(imagePayload)) return parseImagePayload(imagePayload);
+    const taskId = resolveImageTaskId(payload);
+    if (taskId) return pollOpenAIImageGenerationTask(config, taskId, options);
+    return parseImagePayload(imagePayload);
+}
+
+async function requestOpenAIImageGenerationSync(config: AiConfig, prompt: string, n: number, options?: RequestOptions) {
+    const response = await axios.post<ImageTaskResponse>(aiApiUrl(config, "/images/generations"), buildOpenAIImageGenerationBody(config, prompt, n, false), {
+        headers: aiHeaders(config, "application/json"),
+        signal: options?.signal,
+    });
+    return parseOpenAIImageCreatePayload(config, response.data, options);
+}
+
+async function requestOpenAIImageGenerationAsync(config: AiConfig, prompt: string, n: number, options?: RequestOptions) {
+    const response = await axios.post<ImageTaskResponse>(aiApiUrl(config, "/images/generations"), buildOpenAIImageGenerationBody(config, prompt, n, true), {
+        headers: aiHeaders(config, "application/json"),
+        signal: options?.signal,
+    });
+    const taskId = resolveImageTaskId(response.data);
+    if (!taskId && !imagePayloadHasImages(resolveImageTaskPayload(response.data))) {
+        throw new Error("异步接口没有返回任务 ID");
+    }
+    return parseOpenAIImageCreatePayload(config, response.data, options);
+}
+
+async function pollOpenAIImageGenerationTask(config: AiConfig, taskId: string, options?: RequestOptions) {
+    const intervalMs = normalizeBoundedNumber(config.imagePollIntervalMs, DEFAULT_IMAGE_POLL_INTERVAL_MS, 1000, 30000);
+    const timeoutMs = normalizeBoundedNumber(config.imagePollTimeoutMs, DEFAULT_IMAGE_POLL_TIMEOUT_MS, 10000, 1800000);
+    const deadline = Date.now() + timeoutMs;
+    let lastRecoverableError = "";
+
+    for (;;) {
+        if (options?.signal?.aborted) throw new DOMException("请求已取消", "AbortError");
+        if (Date.now() > deadline) {
+            throw new Error(lastRecoverableError ? `异步生图任务轮询超时：${lastRecoverableError}` : "异步生图任务轮询超时");
+        }
+
+        let payload: ImageTaskResponse | null = null;
+        try {
+            const response = await axios.get<ImageTaskResponse>(aiApiUrl(config, `/images/generations/${encodeURIComponent(taskId)}`), {
+                headers: aiHeaders(config),
+                signal: options?.signal,
+            });
+            payload = response.data;
+        } catch (error) {
+            if (axios.isCancel(error) || (error instanceof DOMException && error.name === "AbortError")) throw error;
+            if (axios.isAxiosError(error)) {
+                const status = error.response?.status;
+                if (status === 401 || status === 403 || status === 404 || status === 429) throw error;
+            }
+            lastRecoverableError = readAxiosError(error, "轮询失败");
+        }
+
+        if (payload) {
+            const imagePayload = resolveImageTaskPayload(payload);
+            if (isImageTaskCompleted(payload) || imagePayloadHasImages(imagePayload)) return parseImagePayload(imagePayload);
+            if (isImageTaskFailed(payload)) throw new Error(readImageTaskError(payload));
+        }
+
+        await delay(intervalMs, options?.signal);
+    }
+}
+
+function readTaskIdFromAxiosError(error: unknown) {
+    if (!axios.isAxiosError<ImageTaskResponse>(error)) return "";
+    const data = error.response?.data;
+    return data ? resolveImageTaskId(data) : "";
+}
+
+function shouldTryAsyncAfterSyncError(error: unknown) {
+    if (!axios.isAxiosError(error) || !error.response) return false;
+    const status = error.response.status;
+    if (![400, 405, 409, 422].includes(status)) return false;
+    const message = readAxiosError(error, "请求失败").toLowerCase();
+    const mentionsAsync = /async|asynchronous|异步|任务|task|queued|poll/.test(message);
+    const asksForAsync = /需要|必须|请使用|use|required|only|not support|unsupported|不支持/.test(message);
+    return mentionsAsync && asksForAsync;
+}
+
 export async function requestGeneration(config: AiConfig, prompt: string, options?: RequestOptions) {
     const requestConfig = resolveModelRequestConfig(config, config.model || config.imageModel);
     const n = Math.max(1, Math.min(15, Math.floor(Math.abs(Number(config.count)) || 1)));
@@ -619,27 +797,18 @@ export async function requestGeneration(config: AiConfig, prompt: string, option
             throw new Error(readAxiosError(error, "请求失败"));
         }
     }
-    const quality = normalizeQuality(config.quality);
-    const requestSize = resolveRequestSize(quality, config.size);
+    const dispatchMode = normalizeImageDispatchMode(requestConfig.imageDispatchMode);
     try {
-        const response = await axios.post<ImageApiResponse>(
-            aiApiUrl(requestConfig, "/images/generations"),
-            {
-                model: requestConfig.model,
-                prompt: withSystemPrompt(requestConfig, prompt),
-                n,
-                ...(quality ? { quality } : {}),
-                ...(requestSize ? { size: requestSize } : {}),
-                response_format: "b64_json",
-                output_format: IMAGE_OUTPUT_FORMAT,
-            },
-            {
-                headers: aiHeaders(requestConfig, "application/json"),
-                signal: options?.signal,
-            },
-        );
-        const images = parseImagePayload(response.data);
-        return images;
+        if (dispatchMode === "async") return await requestOpenAIImageGenerationAsync(requestConfig, prompt, n, options);
+        if (dispatchMode === "sync") return await requestOpenAIImageGenerationSync(requestConfig, prompt, n, options);
+        try {
+            return await requestOpenAIImageGenerationSync(requestConfig, prompt, n, options);
+        } catch (syncError) {
+            const taskId = readTaskIdFromAxiosError(syncError);
+            if (taskId) return await pollOpenAIImageGenerationTask(requestConfig, taskId, options);
+            if (shouldTryAsyncAfterSyncError(syncError)) return await requestOpenAIImageGenerationAsync(requestConfig, prompt, n, options);
+            throw syncError;
+        }
     } catch (error) {
         throw new Error(readAxiosError(error, "请求失败"));
     }

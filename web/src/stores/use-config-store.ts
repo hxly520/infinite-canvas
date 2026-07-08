@@ -4,6 +4,8 @@ import { persist } from "zustand/middleware";
 import { nanoid } from "nanoid";
 
 export type ApiCallFormat = "openai" | "gemini";
+export type ImageDispatchMode = "auto" | "sync" | "async";
+export type ImageResponseFormat = "b64_json" | "url";
 
 export type ModelChannel = {
     id: string;
@@ -43,6 +45,11 @@ export type AiConfig = {
     size: string;
     count: string;
     canvasImageCount: string;
+    imageDispatchMode: ImageDispatchMode;
+    imageResponseFormat: ImageResponseFormat;
+    imagePollIntervalMs: string;
+    imagePollTimeoutMs: string;
+    imageConcurrency: string;
 };
 
 export type WebdavSyncConfig = {
@@ -110,6 +117,11 @@ export const defaultConfig: AiConfig = {
     size: "1:1",
     count: "1",
     canvasImageCount: "3",
+    imageDispatchMode: "auto",
+    imageResponseFormat: "b64_json",
+    imagePollIntervalMs: "2500",
+    imagePollTimeoutMs: "600000",
+    imageConcurrency: "5",
 };
 
 export const defaultWebdavSyncConfig: WebdavSyncConfig = {
@@ -237,6 +249,11 @@ export const useConfigStore = create<ConfigStore>()(
                         videoGenerateAudio: config.videoGenerateAudio || "true",
                         videoWatermark: config.videoWatermark || "false",
                         canvasImageCount: config.canvasImageCount || "3",
+                        imageDispatchMode: normalizeImageDispatchMode(config.imageDispatchMode),
+                        imageResponseFormat: normalizeImageResponseFormat(config.imageResponseFormat),
+                        imagePollIntervalMs: config.imagePollIntervalMs || defaultConfig.imagePollIntervalMs,
+                        imagePollTimeoutMs: config.imagePollTimeoutMs || defaultConfig.imagePollTimeoutMs,
+                        imageConcurrency: config.imageConcurrency || defaultConfig.imageConcurrency,
                         imageModels: Array.isArray(persistedConfig.imageModels) ? normalizeModelList(config.imageModels, channels) : filterModelsByCapability(models, "image"),
                         videoModels: Array.isArray(persistedConfig.videoModels) ? normalizeModelList(config.videoModels, channels) : filterModelsByCapability(models, "video"),
                         textModels: Array.isArray(persistedConfig.textModels) ? normalizeModelList(config.textModels, channels) : filterModelsByCapability(models, "text"),
@@ -369,6 +386,14 @@ export function defaultBaseUrlForApiFormat(apiFormat: ApiCallFormat) {
 
 function normalizeApiFormat(apiFormat: unknown): ApiCallFormat {
     return apiFormat === "gemini" ? "gemini" : "openai";
+}
+
+function normalizeImageDispatchMode(value: unknown): ImageDispatchMode {
+    return value === "sync" || value === "async" || value === "auto" ? value : defaultConfig.imageDispatchMode;
+}
+
+function normalizeImageResponseFormat(value: unknown): ImageResponseFormat {
+    return value === "url" ? "url" : defaultConfig.imageResponseFormat;
 }
 
 function uniqueRawModels(models: string[]) {

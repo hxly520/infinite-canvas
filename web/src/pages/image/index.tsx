@@ -57,7 +57,7 @@ type GenerationLog = {
     thumbnails: string[];
 };
 
-type GenerationLogConfig = Pick<AiConfig, "model" | "imageModel" | "quality" | "size" | "count">;
+type GenerationLogConfig = Pick<AiConfig, "model" | "imageModel" | "quality" | "size" | "count" | "imageDispatchMode" | "imageConcurrency">;
 
 type UpdateAiConfig = <K extends keyof AiConfig>(key: K, value: AiConfig[K]) => void;
 
@@ -91,7 +91,7 @@ export default function ImagePage() {
 
     const model = effectiveConfig.imageModel || effectiveConfig.model;
     const canGenerate = Boolean(prompt.trim());
-    const generationCount = Math.max(1, Math.min(10, Number(config.count) || 1));
+    const generationCount = Math.max(1, Math.min(10, Math.floor(Math.abs(Number(config.count)) || 1)));
 
     useEffect(() => {
         if (!running || !startedAt) return;
@@ -157,9 +157,7 @@ export default function ImagePage() {
         const batchStartedAt = performance.now();
         setStartedAt(batchStartedAt);
 
-        const tasks = Array.from({ length: generationCount }, (_, index) => runGenerationSlot(index, snapshot));
-
-        const result = await Promise.allSettled(tasks);
+        const result = await runWithConcurrency(generationCount, readImageConcurrency(snapshot.config.imageConcurrency), (index) => runGenerationSlot(index, snapshot));
         const successImages = result.filter((item): item is PromiseFulfilledResult<GeneratedImage> => item.status === "fulfilled").map((item) => item.value);
         const successCount = successImages.length;
         const failCount = generationCount - successCount;
@@ -263,6 +261,8 @@ export default function ImagePage() {
         if (log.config.quality) updateConfig("quality", log.config.quality);
         if (log.config.size) updateConfig("size", log.config.size);
         if (log.config.count) updateConfig("count", log.config.count);
+        if (log.config.imageDispatchMode) updateConfig("imageDispatchMode", log.config.imageDispatchMode);
+        if (log.config.imageConcurrency) updateConfig("imageConcurrency", log.config.imageConcurrency);
         setResults(log.images.map((image) => ({ id: image.id, status: "success", image })));
     };
 
@@ -487,7 +487,7 @@ function GenerationSettings({ config, model, updateConfig, openConfigDialog }: {
                 <ModelPicker config={config} value={model} onChange={(value) => updateConfig("imageModel", value)} capability="image" fullWidth onMissingConfig={() => openConfigDialog(false)} />
             </label>
             <div className="col-span-2">
-                <ImageSettingsPanel config={config} onConfigChange={(key, value) => updateConfig(key, value)} theme={theme} showTitle={false} className="space-y-4" maxCount={10} />
+                <ImageSettingsPanel config={config} onConfigChange={(key, value) => updateConfig(key, value)} theme={theme} showTitle={false} className="space-y-4" maxCount={10} showAdvancedControls />
             </div>
         </>
     );
@@ -577,6 +577,29 @@ function FailedImageCard({ error, onRetry }: { error: string; onRetry: () => voi
 
 function updateResultAt(results: GenerationResult[], index: number, next: Partial<GenerationResult>) {
     return results.map((item, itemIndex) => (itemIndex === index ? { ...item, ...next } : item));
+}
+
+async function runWithConcurrency<T>(count: number, concurrency: number, task: (index: number) => Promise<T>) {
+    const results = new Array<PromiseSettledResult<T>>(count);
+    let nextIndex = 0;
+    const worker = async () => {
+        for (;;) {
+            const index = nextIndex;
+            nextIndex += 1;
+            if (index >= count) return;
+            try {
+                results[index] = { status: "fulfilled", value: await task(index) };
+            } catch (reason) {
+                results[index] = { status: "rejected", reason };
+            }
+        }
+    };
+    await Promise.all(Array.from({ length: Math.min(count, concurrency) }, worker));
+    return results;
+}
+
+function readImageConcurrency(value: string) {
+    return Math.max(1, Math.min(10, Math.floor(Math.abs(Number(value)) || 5)));
 }
 
 function LogPanel({
@@ -749,6 +772,8 @@ function normalizeLogConfig(log: Partial<GenerationLog>): GenerationLogConfig {
         quality: log.config?.quality || log.quality || "",
         size: log.config?.size || log.size || "",
         count: log.config?.count || String(log.imageCount || log.successCount || 1),
+        imageDispatchMode: log.config?.imageDispatchMode || "auto",
+        imageConcurrency: log.config?.imageConcurrency || "5",
     };
 }
 
@@ -797,6 +822,8 @@ function buildLog({
         quality: config.quality,
         size: config.size,
         count: config.count,
+        imageDispatchMode: config.imageDispatchMode,
+        imageConcurrency: config.imageConcurrency,
     };
     return {
         id: nanoid(),

@@ -10,6 +10,11 @@ const qualityOptions = [
     { value: "medium", label: "中" },
     { value: "low", label: "低" },
 ];
+const dispatchOptions = [
+    { value: "auto", label: "自动", title: "自动：同步优先，只有明确需要异步时才切换" },
+    { value: "sync", label: "同步", title: "同步：保持 OpenAI Images 原有请求方式" },
+    { value: "async", label: "异步", title: "异步：创建任务后轮询结果，适合长时间生图上游" },
+] as const;
 const DIMENSION_STEP = 16;
 
 const aspectOptions = [
@@ -28,20 +33,24 @@ const aspectOptions = [
     { value: "auto", label: "auto", width: 0, height: 0, icon: "auto" },
 ];
 
+type ImageSettingsKey = "quality" | "size" | "count" | "imageDispatchMode" | "imageConcurrency";
+
 type ImageSettingsPanelProps = {
     config: AiConfig;
-    onConfigChange: (key: "quality" | "size" | "count", value: string) => void;
+    onConfigChange: <K extends ImageSettingsKey>(key: K, value: AiConfig[K]) => void;
     theme: CanvasTheme;
     showTitle?: boolean;
     className?: string;
     maxCount?: number;
     quickCount?: number;
+    showAdvancedControls?: boolean;
 };
 
-export function ImageSettingsPanel({ config, onConfigChange, theme, showTitle = true, className = "w-[320px] space-y-4 rounded-2xl px-1 py-0.5", maxCount = 15, quickCount = 10 }: ImageSettingsPanelProps) {
+export function ImageSettingsPanel({ config, onConfigChange, theme, showTitle = true, className = "w-[320px] space-y-4 rounded-2xl px-1 py-0.5", maxCount = 15, quickCount = 10, showAdvancedControls = false }: ImageSettingsPanelProps) {
     const [snapDimensionToStep, setSnapDimensionToStep] = useState(true);
     const quality = config.quality || "auto";
     const count = Math.max(1, Math.min(maxCount, Math.floor(Math.abs(Number(config.count)) || 1)));
+    const concurrency = Math.max(1, Math.min(10, Math.floor(Math.abs(Number(config.imageConcurrency)) || 5)));
     const activeSize = config.size || "auto";
     const selectedAspect = aspectOptions.find((item) => (item.size || item.value) === activeSize || item.value === activeSize);
     const dimensions = readSizeDimensions(activeSize, selectedAspect || aspectOptions[0]);
@@ -125,6 +134,31 @@ export function ImageSettingsPanel({ config, onConfigChange, theme, showTitle = 
                         <CountInput value={count} max={maxCount} theme={theme} onChange={(value) => onConfigChange("count", String(value || 1))} />
                     </div>
                 </div>
+                {showAdvancedControls ? (
+                    <>
+                        <div className="space-y-2.5">
+                            <SettingTitle color={theme.node.muted}>接口模式</SettingTitle>
+                            <div className="grid grid-cols-3 gap-2.5">
+                                {dispatchOptions.map((item) => (
+                                    <OptionPill key={item.value} selected={(config.imageDispatchMode || "auto") === item.value} theme={theme} title={item.title} onClick={() => onConfigChange("imageDispatchMode", item.value)}>
+                                        {item.label}
+                                    </OptionPill>
+                                ))}
+                            </div>
+                        </div>
+                        <div className="space-y-2.5">
+                            <SettingTitle color={theme.node.muted}>并发</SettingTitle>
+                            <div className="grid grid-cols-4 gap-2.5">
+                                {[1, 3, 5, 10].map((value) => (
+                                    <OptionPill key={value} selected={concurrency === value} theme={theme} onClick={() => onConfigChange("imageConcurrency", String(value))}>
+                                        {value}
+                                    </OptionPill>
+                                ))}
+                                <ConcurrencyInput value={concurrency} theme={theme} onChange={(value) => onConfigChange("imageConcurrency", String(value || 5))} />
+                            </div>
+                        </div>
+                    </>
+                ) : null}
             </div>
         </ImageSettingsTheme>
     );
@@ -151,17 +185,35 @@ export function imageSizeLabel(size: string) {
     return aspectOptions.find((item) => (item.size || item.value) === size || item.value === size)?.label || size;
 }
 
-function OptionPill({ selected, theme, onClick, children }: { selected: boolean; theme: CanvasTheme; onClick: () => void; children: ReactNode }) {
+function OptionPill({ selected, theme, title, onClick, children }: { selected: boolean; theme: CanvasTheme; title?: string; onClick: () => void; children: ReactNode }) {
     return (
         <button
             type="button"
             className="h-9 cursor-pointer rounded-full border px-2 text-sm transition hover:opacity-80"
             style={{ background: "transparent", borderColor: selected ? theme.node.text : theme.node.stroke, color: theme.node.text }}
+            title={title}
             onMouseDown={(event) => event.stopPropagation()}
             onClick={onClick}
         >
             {children}
         </button>
+    );
+}
+
+function ConcurrencyInput({ value, theme, onChange }: { value: number; theme: CanvasTheme; onChange: (value: number | null) => void }) {
+    return (
+        <label className="col-span-4 flex h-9 overflow-hidden rounded-full border text-sm" style={{ borderColor: theme.node.stroke, color: theme.node.text }}>
+            <input
+                type="number"
+                min={1}
+                max={10}
+                className="min-w-0 flex-1 bg-transparent px-3 text-center outline-none [appearance:textfield] [&::-webkit-inner-spin-button]:appearance-none [&::-webkit-outer-spin-button]:appearance-none"
+                style={{ color: theme.node.text, WebkitTextFillColor: theme.node.text }}
+                value={value || ""}
+                onChange={(event) => onChange(Math.max(1, Math.min(10, Number(event.target.value) || 1)))}
+                onMouseDown={(event) => event.stopPropagation()}
+            />
+        </label>
     );
 }
 
