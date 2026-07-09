@@ -238,7 +238,7 @@ export function AppConfigModal() {
                                         <div className="flex w-fit max-w-full flex-wrap items-center gap-1.5 rounded-md border border-amber-300 bg-amber-50 px-2.5 py-1.5 text-xs text-amber-900 dark:border-amber-700/60 dark:bg-amber-950/30 dark:text-amber-100">
                                             <CircleAlert className="size-3.5 shrink-0" />
                                             <span className="font-semibold">重要：</span>
-                                            <span>新增或拉取模型后，需要到“模型”Tab 选择可选项才会显示。</span>
+                                            <span>新增或拉取模型后，会自动加入对应类型的可选项，也可到“模型”Tab 微调。</span>
                                             <Button type="link" size="small" className="h-auto p-0 text-xs font-semibold text-amber-900 dark:text-amber-100" onClick={() => setActiveTab("models")}>
                                                 去模型设置
                                             </Button>
@@ -284,7 +284,7 @@ export function AppConfigModal() {
                                                     <Input.Password value={channel.apiKey} onChange={(event) => updateChannel(channel.id, { apiKey: event.target.value })} />
                                                 </Form.Item>
                                                 <Form.Item label="模型列表" className="mb-0 md:col-span-2">
-                                                    <Select mode="tags" showSearch allowClear maxTagCount="responsive" placeholder="输入模型名，或点击拉取模型" value={channel.models} onChange={(models) => updateChannel(channel.id, { models })} />
+                                                    <Select mode="tags" showSearch allowClear placeholder="输入模型名，或点击拉取模型" value={channel.models} onChange={(models) => updateChannel(channel.id, { models })} />
                                                 </Form.Item>
                                             </div>
                                         </section>
@@ -309,7 +309,6 @@ export function AppConfigModal() {
                                                 mode="tags"
                                                 showSearch
                                                 allowClear
-                                                maxTagCount="responsive"
                                                 placeholder={config.models.length ? `请选择或输入${group.optionsLabel}` : "先到渠道里填写或拉取模型"}
                                                 value={config[group.modelsKey]}
                                                 options={modelOptions}
@@ -448,7 +447,7 @@ function withChannels(config: AiConfig, channels: ModelChannel[]): AiConfig {
 function keepOrSuggest(current: string[], suggested: string[], allModels: string[]) {
     const available = new Set(allModels);
     const kept = uniqueModels(current).filter((model) => available.has(model));
-    return kept.length ? kept : suggested;
+    return uniqueModels([...kept, ...suggested]);
 }
 
 function normalizeDefaultModel(value: string, options: string[]) {

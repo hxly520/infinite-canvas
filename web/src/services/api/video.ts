@@ -15,10 +15,12 @@ type VideoResponse = {
     status?: string;
     state?: string;
     error?: { message?: string } | string | null;
+    data?: VideoResponse | null;
+    result_url?: string;
     url?: string;
     video_url?: string;
-    output?: Array<{ url?: string; video_url?: string }>;
-    content?: { video_url?: string; url?: string } | null;
+    output?: Array<string | { url?: string; video_url?: string; result_url?: string }>;
+    content?: { video_url?: string; url?: string; result_url?: string } | null;
 };
 type ApiVideoResponse = VideoResponse | { code?: number; data?: VideoResponse | null; msg?: string };
 type SeedanceTask = {
@@ -115,14 +117,14 @@ type OpenAIVideoAdapter = {
 function openAIVideoAdapter(model: string): OpenAIVideoAdapter {
     const value = model.toLowerCase();
     if (isSeedanceVideoModel(value)) return openAIVideosAdapter("seedance-flat", "Seedance 视频");
-    if (value.includes("grok") && value.includes("video")) {
+    if (value.includes("grok") && (value.includes("video") || value.includes("vedio"))) {
         return {
             kind: "video-generations-json",
             payloadBuilder: "grok",
             label: "Grok 视频",
-            createPath: "/videos/generations",
-            statusPathBase: "/videos",
-            contentPathBase: "/videos",
+            createPath: "/video/generations",
+            statusPathBase: "/video/generations",
+            contentPathBase: "/video/generations",
             pollDelayMs: OPENAI_VIDEO_POLL_DELAY_MS,
             maxAttempts: OPENAI_VIDEO_MAX_ATTEMPTS,
         };
@@ -130,7 +132,7 @@ function openAIVideoAdapter(model: string): OpenAIVideoAdapter {
     if (value.includes("omni-v2v")) return openAIVideosAdapter("omni-v2v", "Omni 视频转视频");
     if (value.includes("omni")) return openAIVideosAdapter("omni-frame", "Omni 视频");
     if (value.includes("sora")) return openAIVideosAdapter("sora2", "Sora 视频");
-    if (value.includes("video") || value.includes("veo") || value.includes("kling") || value.includes("wan") || value.includes("hailuo")) {
+    if (value.includes("video") || value.includes("vedio") || value.includes("veo") || value.includes("kling") || value.includes("wan") || value.includes("hailuo")) {
         return openAIVideosAdapter("generic", "视频");
     }
     return {
@@ -269,7 +271,7 @@ async function buildOpenAIVideoPayload(config: AiConfig, model: string, prompt: 
 
 async function openAIVideoTaskFromCreateResponse(config: AiConfig, created: VideoResponse, defaults: Omit<VideoGenerationTask, "id" | "provider">, options?: RequestOptions): Promise<VideoGenerationTask> {
     const id = extractVideoTaskId(created);
-    const status = normalizeTaskStatus(created.status || created.state);
+    const status = normalizeTaskStatus(extractVideoStatus(created));
     const url = extractVideoResultUrl(created);
     if ((status === "completed" || (!id && url)) && url) {
         if (canDownloadVideoUrl(url, config)) return { ...defaults, id: id || `completed-${Date.now()}`, provider: "openai", result: await videoResultFromUrl(url, config, options) };
@@ -312,7 +314,7 @@ async function pollOpenAIVideoTask(config: AiConfig, task: VideoGenerationTask, 
     const contentPathBase = task.contentPathBase || statusPathBase;
     try {
         const video = unwrapVideoResponse((await axios.get<ApiVideoResponse>(aiApiUrl(config, `${statusPathBase}/${encodeURIComponent(task.id)}`), { headers: aiHeaders(config), signal: options?.signal })).data);
-        const status = normalizeTaskStatus(video.status || video.state);
+        const status = normalizeTaskStatus(extractVideoStatus(video));
         if (status === "completed") {
             const resultUrl = extractVideoResultUrl(video);
             if (resultUrl && canDownloadVideoUrl(resultUrl, config)) return { status: "completed", result: await videoResultFromUrl(resultUrl, config, options) };
@@ -430,26 +432,32 @@ function normalizeTaskStatus(value: string | undefined) {
     return "pending";
 }
 
-function extractVideoTaskId(video: VideoResponse) {
-    return video.id || video.request_id || video.task_id || "";
+function extractVideoTaskId(video: VideoResponse): string {
+    return video.id || video.request_id || video.task_id || (video.data ? extractVideoTaskId(video.data) : "");
+}
+
+function extractVideoStatus(video: VideoResponse): string {
+    return video.status || video.state || (video.data ? extractVideoStatus(video.data) : "");
 }
 
 function extractVideoResultUrl(video: VideoResponse): string {
-    const outputUrl = video.output?.find((item) => item.video_url || item.url);
+    const outputUrl = video.output?.find((item) => (typeof item === "string" ? item : item.video_url || item.url || item.result_url));
     return (
+        video.result_url ||
         video.video_url ||
         video.url ||
+        video.content?.result_url ||
         video.content?.video_url ||
         video.content?.url ||
-        outputUrl?.video_url ||
-        outputUrl?.url ||
+        (typeof outputUrl === "string" ? outputUrl : outputUrl?.result_url || outputUrl?.video_url || outputUrl?.url) ||
+        (video.data ? extractVideoResultUrl(video.data) : "") ||
         ""
     );
 }
 
-function extractVideoError(video: VideoResponse) {
+function extractVideoError(video: VideoResponse): string {
     if (typeof video.error === "string") return video.error;
-    return video.error?.message || "";
+    return video.error?.message || (video.data ? extractVideoError(video.data) : "");
 }
 
 function createVideoIdempotencyKey() {

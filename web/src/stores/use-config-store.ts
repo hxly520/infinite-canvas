@@ -147,7 +147,7 @@ type ConfigStore = {
 
 function isVideoModelName(model: string) {
     const value = modelOptionName(model).toLowerCase();
-    return value.includes("seedance") || value.includes("video") || value.includes("sora") || value.includes("omni") || value.includes("veo") || value.includes("kling") || value.includes("wan") || value.includes("hailuo");
+    return value.includes("seedance") || value.includes("video") || value.includes("vedio") || value.includes("sora") || value.includes("omni") || value.includes("veo") || value.includes("kling") || value.includes("wan") || value.includes("hailuo");
 }
 
 function isImageModelName(model: string) {
@@ -254,10 +254,10 @@ export const useConfigStore = create<ConfigStore>()(
                         imagePollIntervalMs: config.imagePollIntervalMs || defaultConfig.imagePollIntervalMs,
                         imagePollTimeoutMs: config.imagePollTimeoutMs || defaultConfig.imagePollTimeoutMs,
                         imageConcurrency: config.imageConcurrency || defaultConfig.imageConcurrency,
-                        imageModels: Array.isArray(persistedConfig.imageModels) ? normalizeModelList(config.imageModels, channels) : filterModelsByCapability(models, "image"),
-                        videoModels: Array.isArray(persistedConfig.videoModels) ? normalizeModelList(config.videoModels, channels) : filterModelsByCapability(models, "video"),
-                        textModels: Array.isArray(persistedConfig.textModels) ? normalizeModelList(config.textModels, channels) : filterModelsByCapability(models, "text"),
-                        audioModels: Array.isArray(persistedConfig.audioModels) ? normalizeModelList(config.audioModels, channels) : filterModelsByCapability(models, "audio"),
+                        imageModels: Array.isArray(persistedConfig.imageModels) ? mergeModelList(config.imageModels, filterModelsByCapability(models, "image"), channels) : filterModelsByCapability(models, "image"),
+                        videoModels: Array.isArray(persistedConfig.videoModels) ? mergeModelList(config.videoModels, filterModelsByCapability(models, "video"), channels) : filterModelsByCapability(models, "video"),
+                        textModels: Array.isArray(persistedConfig.textModels) ? mergeModelList(config.textModels, filterModelsByCapability(models, "text"), channels) : filterModelsByCapability(models, "text"),
+                        audioModels: Array.isArray(persistedConfig.audioModels) ? mergeModelList(config.audioModels, filterModelsByCapability(models, "audio"), channels) : filterModelsByCapability(models, "audio"),
                     },
                 };
             },
@@ -270,6 +270,10 @@ function normalizeModelList(models: string[], channels: ModelChannel[]) {
     return Array.from(new Set((models || []).map((model) => model.trim()).filter(Boolean)))
         .map((model) => normalizeModelOptionValue(model, channels))
         .filter((model) => !allModelOptions.length || allModelOptions.includes(model) || !isChannelModelValue(model));
+}
+
+function mergeModelList(current: string[], suggested: string[], channels: ModelChannel[]) {
+    return Array.from(new Set([...normalizeModelList(current, channels), ...suggested]));
 }
 
 export function useEffectiveConfig() {
