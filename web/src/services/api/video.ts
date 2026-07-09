@@ -30,6 +30,9 @@ type SeedanceTask = {
 type ApiEnvelope<T> = T | { code?: number; data?: T | null; msg?: string };
 type RequestOptions = { signal?: AbortSignal };
 
+const OPENAI_VIDEO_POLL_DELAY_MS = 5000;
+const OPENAI_VIDEO_MAX_ATTEMPTS = 360;
+
 export type VideoGenerationResult = { blob?: Blob; url?: string; mimeType?: string };
 export type VideoGenerationTask = {
     id: string;
@@ -112,11 +115,11 @@ function openAIVideoAdapter(model: string): OpenAIVideoAdapter {
             kind: "video-generations-json",
             payloadBuilder: "grok",
             label: "Grok 视频",
-            createPath: "/video/generations",
-            statusPathBase: "/video/generations",
-            contentPathBase: "/video/generations",
-            pollDelayMs: 5000,
-            maxAttempts: 60,
+            createPath: "/videos/generations",
+            statusPathBase: "/videos",
+            contentPathBase: "/videos",
+            pollDelayMs: OPENAI_VIDEO_POLL_DELAY_MS,
+            maxAttempts: OPENAI_VIDEO_MAX_ATTEMPTS,
         };
     }
     if (value.includes("omni-v2v")) return openAIVideosAdapter("omni-v2v", "Omni 视频转视频");
@@ -132,8 +135,8 @@ function openAIVideoAdapter(model: string): OpenAIVideoAdapter {
         createPath: "/videos",
         statusPathBase: "/videos",
         contentPathBase: "/videos",
-        pollDelayMs: 2500,
-        maxAttempts: 120,
+        pollDelayMs: OPENAI_VIDEO_POLL_DELAY_MS,
+        maxAttempts: OPENAI_VIDEO_MAX_ATTEMPTS,
     };
 }
 
@@ -145,8 +148,8 @@ function openAIVideosAdapter(payloadBuilder: OpenAIVideoAdapter["payloadBuilder"
         createPath: "/videos",
         statusPathBase: "/videos",
         contentPathBase: "/videos",
-        pollDelayMs: 5000,
-        maxAttempts: 120,
+        pollDelayMs: OPENAI_VIDEO_POLL_DELAY_MS,
+        maxAttempts: OPENAI_VIDEO_MAX_ATTEMPTS,
     };
 }
 

@@ -290,8 +290,10 @@ export default function VideoPage() {
         setStartedAt((value) => value || performance.now());
         setResults((value) => (value.length ? value : [{ id: log.id, status: "pending" }]));
         const taskConfig = buildVideoConfig({ ...effectiveConfig, ...log.config }, log.task.model || log.model);
+        const pollDelayMs = log.task.pollDelayMs || 5000;
+        const maxAttempts = log.task.maxAttempts || 360;
         try {
-            for (let attempt = 0; attempt < 120; attempt += 1) {
+            for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
                 const state = await pollVideoGenerationTask(configOverride || taskConfig, log.task);
                 if (state.status === "completed") {
                     const stored = await storeGeneratedVideo(state.result);
@@ -311,8 +313,8 @@ export default function VideoPage() {
                     return;
                 }
                 if (state.status === "failed") throw new Error(state.error);
-                if (attempt === 119) throw new Error("视频生成超时，请稍后重试");
-                await delay(log.task.provider === "seedance" ? 5000 : 2500);
+                if (attempt === maxAttempts - 1) throw new Error("视频生成超时，请稍后重试");
+                await delay(pollDelayMs);
             }
         } catch (error) {
             const errorMessage = error instanceof Error ? error.message : "生成失败";
