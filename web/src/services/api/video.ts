@@ -100,7 +100,6 @@ export async function pollVideoGenerationTask(config: AiConfig, task: VideoGener
 
 export async function storeGeneratedVideo(result: VideoGenerationResult): Promise<UploadedFile> {
     if (result.blob) return uploadMediaFile(result.blob, "video");
-    if (result.url) return { url: result.url, storageKey: "", bytes: 0, mimeType: result.mimeType || "video/mp4" };
     throw new Error("视频接口没有返回可播放的视频");
 }
 
@@ -125,7 +124,7 @@ function openAIVideoAdapter(model: string): OpenAIVideoAdapter {
             label: "Grok 视频",
             createPath: "/video/generations",
             statusPathBase: "/video/generations",
-            contentPathBase: "/video/generations",
+            contentPathBase: "/videos",
             pollDelayMs: OPENAI_VIDEO_POLL_DELAY_MS,
             maxAttempts: OPENAI_VIDEO_MAX_ATTEMPTS,
         };
@@ -279,11 +278,11 @@ async function openAIVideoTaskFromCreateResponse(config: AiConfig, created: Vide
         if (id) {
             try {
                 return { ...defaults, id, provider: "openai", result: await videoResultFromContentPath(config, defaults.contentPathBase || defaults.statusPathBase || "/videos", id, options) };
-            } catch {
-                return { ...defaults, id, provider: "openai", result: await videoResultFromUrl(url, config, options, { allowExternal: true, allowUrlFallback: true }) };
+            } catch (error) {
+                throw new Error(readAxiosError(error, "视频下载代理失败"));
             }
         }
-        return { ...defaults, id: `completed-${Date.now()}`, provider: "openai", result: await videoResultFromUrl(url, config, options, { allowExternal: true, allowUrlFallback: true }) };
+        return { ...defaults, id: `completed-${Date.now()}`, provider: "openai", result: await videoResultFromUrl(url, config, options) };
     }
     if (status === "failed") throw new Error(extractVideoError(created) || "视频生成失败");
     if (!id) throw new Error("视频接口没有返回任务 ID");
@@ -328,8 +327,7 @@ async function pollOpenAIVideoTask(config: AiConfig, task: VideoGenerationTask, 
             try {
                 return { status: "completed", result: await videoResultFromContentPath(config, contentPathBase, task.id, options) };
             } catch (error) {
-                if (resultUrl) return { status: "completed", result: await videoResultFromUrl(resultUrl, config, options, { allowExternal: true, allowUrlFallback: true }) };
-                throw error;
+                throw new Error(readAxiosError(error, "视频下载代理失败"));
             }
         }
         if (status === "failed") return { status: "failed", error: extractVideoError(video) || "视频生成失败" };
@@ -377,7 +375,7 @@ async function pollSeedanceTask(config: AiConfig, task: VideoGenerationTask, opt
         if (state.status === "succeeded") {
             const url = state.content?.video_url;
             if (!url) return { status: "failed", error: "Seedance 任务成功但没有返回视频 URL" };
-            return { status: "completed", result: await videoResultFromUrl(url, config, options, { allowExternal: true }) };
+            return { status: "completed", result: await videoResultFromUrl(url, config, options) };
         }
         if (state.status === "failed" || state.status === "cancelled" || state.status === "expired") return { status: "failed", error: state.error?.message || `Seedance 视频生成${state.status === "expired" ? "超时" : "失败"}` };
         return { status: "pending" };
@@ -545,23 +543,22 @@ async function resolveSeedanceAudioUrl(audio: ReferenceAudio) {
     return blobToDataUrl(blob);
 }
 
-async function videoResultFromUrl(url: string, config: AiConfig, options?: RequestOptions, downloadOptions?: { allowExternal?: boolean; allowUrlFallback?: boolean }): Promise<VideoGenerationResult> {
-    if (!downloadOptions?.allowExternal && !canDownloadVideoUrl(url, config)) throw new Error("视频接口返回了外部媒体地址，请通过支持媒体代理的中转站端点调用");
-    return videoResultFromDownloadURL(resolveVideoDownloadUrl(url, config), config, canDownloadVideoUrl(url, config), options, downloadOptions?.allowUrlFallback ? url : "");
+async function videoResultFromUrl(url: string, config: AiConfig, options?: RequestOptions): Promise<VideoGenerationResult> {
+    if (!canDownloadVideoUrl(url, config)) throw new Error("视频接口返回了外部媒体地址，请通过支持媒体代理的中转站端点调用");
+    return videoResultFromDownloadURL(resolveVideoDownloadUrl(url, config), config, true, options);
 }
 
 async function videoResultFromContentPath(config: AiConfig, contentPathBase: string, taskId: string, options?: RequestOptions): Promise<VideoGenerationResult> {
     return videoResultFromDownloadURL(aiApiUrl(config, `${contentPathBase}/${encodeURIComponent(taskId)}/content`), config, true, options);
 }
 
-async function videoResultFromDownloadURL(url: string, config: AiConfig, withAuth: boolean, options?: RequestOptions, fallbackUrl = ""): Promise<VideoGenerationResult> {
+async function videoResultFromDownloadURL(url: string, config: AiConfig, withAuth: boolean, options?: RequestOptions): Promise<VideoGenerationResult> {
     try {
         const response = await axios.get<Blob>(url, { headers: withAuth ? aiHeaders(config) : undefined, responseType: "blob", signal: options?.signal });
         await assertVideoBlob(response.data);
         return { blob: response.data };
     } catch (error) {
         if (axios.isCancel(error) || options?.signal?.aborted) throw error;
-        if (fallbackUrl) return { url: fallbackUrl, mimeType: "video/mp4" };
         throw new Error(readAxiosError(error, "视频下载失败"));
     }
 }
