@@ -71,6 +71,16 @@ export function isSeedanceFastModel(model: string) {
     return isSeedanceVideoModel(value) && value.includes("fast");
 }
 
+export function seedanceFixedResolution(model: string) {
+    const match = model.toLowerCase().match(/(?:^|[-_])(480p|720p|1080p|2160p|4k)(?:$|[-_])/);
+    if (!match) return "";
+    return match[1] === "2160p" ? "4k" : match[1];
+}
+
+export function isSeedancePerSecondModel(model: string) {
+    return isSeedanceVideoModel(model) && Boolean(seedanceFixedResolution(model));
+}
+
 export function isArkPlanBaseUrl(baseUrl: string) {
     return baseUrl.toLowerCase().includes("ark.cn-beijing.volces.com/api/plan/v3") || baseUrl.toLowerCase().includes("/api/plan/v3");
 }
@@ -128,38 +138,42 @@ export function boolConfig(value: string | undefined, fallback: boolean) {
 }
 
 export function seedanceReferenceLabel(kind: "image" | "video" | "audio", index: number) {
-    if (kind === "image") return `图片${index + 1}`;
-    if (kind === "video") return `视频${index + 1}`;
-    return `音频${index + 1}`;
+    if (kind === "image") return `@image${index + 1}`;
+    if (kind === "video") return `@video${index + 1}`;
+    return `@audio${index + 1}`;
 }
 
 export function buildSeedancePromptText(prompt: string, images: ReferenceImage[], videos: ReferenceVideo[], audios: ReferenceAudio[]) {
-    const labels = [
-        ...images.map((_, index) => seedanceReferenceLabel("image", index)),
-        ...videos.map((_, index) => seedanceReferenceLabel("video", index)),
-        ...audios.map((_, index) => seedanceReferenceLabel("audio", index)),
-    ];
+    const labels = [...images.map((_, index) => seedanceReferenceLabel("image", index)), ...videos.map((_, index) => seedanceReferenceLabel("video", index)), ...audios.map((_, index) => seedanceReferenceLabel("audio", index))];
     const text = prompt.trim();
     if (!labels.length) return text;
-    return `参考素材编号：${labels.join("、")}。请按这些编号理解提示词中的图片、视频和音频引用。\n\n${text}`;
+    return `参考素材编号：${labels.join("、")}。\n\n${text}`;
 }
 
-export function seedanceVideoReferenceError(videos: ReferenceVideo[]) {
+export function seedanceVideoReferenceError(videos: ReferenceVideo[], model = "") {
+    const standardModel = isSeedanceVideoModel(model) && !isSeedancePerSecondModel(model);
+    const perSecondModel = isSeedancePerSecondModel(model);
     let totalDurationMs = 0;
     for (let index = 0; index < videos.length; index += 1) {
         const video = videos[index];
         const label = seedanceReferenceLabel("video", index);
         if (video.bytes && video.bytes > SEEDANCE_REFERENCE_LIMITS.videoMaxBytes) return `${label} 超过 50MB，请压缩后再上传`;
         if (video.durationMs) {
-            if (video.durationMs < 2000 || video.durationMs > 15000) return `${label} 时长需要在 2-15 秒之间`;
+            const minimumDurationMs = standardModel ? 4000 : 2000;
+            if (video.durationMs < minimumDurationMs || video.durationMs > 15000) return `${label} 时长需要在 ${minimumDurationMs / 1000}-15 秒之间`;
             totalDurationMs += video.durationMs;
         }
-        if (video.width && video.height) {
+        if (standardModel && video.width && video.height && (video.width < 720 || video.width > 2160 || video.height < 720 || video.height > 2160)) {
+            return `${label} 每边需要在 720-2160px 之间`;
+        }
+        if (!standardModel && video.width && video.height) {
             if (video.width < 300 || video.width > 6000 || video.height < 300 || video.height > 6000) return `${label} 宽高需要在 300-6000px 之间`;
             const ratio = video.width / video.height;
             if (ratio < 0.4 || ratio > 2.5) return `${label} 宽高比需要在 0.4-2.5 之间`;
-            const pixels = video.width * video.height;
-            if (pixels < 640 * 640 || pixels > 2206 * 946) return `${label} 像素总量不符合 Seedance 要求，请转成 480p/720p/1080p 后再上传`;
+            if (!perSecondModel) {
+                const pixels = video.width * video.height;
+                if (pixels < 640 * 640 || pixels > 2206 * 946) return `${label} 像素总量不符合 Seedance 要求，请转成 480p/720p/1080p 后再上传`;
+            }
         }
     }
     if (totalDurationMs > 15000) return "Seedance 参考视频总时长不能超过 15 秒";

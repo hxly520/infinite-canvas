@@ -19,10 +19,7 @@ export type ResponseToolCall = {
     thoughtSignature?: string;
 };
 
-export type ResponseInputMessage =
-    | AiTextMessage
-    | { type: "function_call"; call_id: string; name: string; arguments: string; thoughtSignature?: string }
-    | { role: "tool"; tool_call_id: string; content: string };
+export type ResponseInputMessage = AiTextMessage | { type: "function_call"; call_id: string; name: string; arguments: string; thoughtSignature?: string } | { role: "tool"; tool_call_id: string; content: string };
 
 export type ResponseFunctionTool = {
     type: "function";
@@ -42,10 +39,7 @@ export type ToolResponseResult = {
 type ToolChoice = "auto" | "required" | { type: "function"; name: string };
 type ResponseMessageContent = AiTextMessage["content"] | string;
 type ResponseInputContent = { type: "input_text"; text: string } | { type: "input_image"; image_url: string };
-type ResponseInputItem =
-    | { role: "system" | "user" | "assistant"; content: string | ResponseInputContent[] }
-    | { type: "function_call"; call_id: string; name: string; arguments: string }
-    | { type: "function_call_output"; call_id: string; output: string };
+type ResponseInputItem = { role: "system" | "user" | "assistant"; content: string | ResponseInputContent[] } | { type: "function_call"; call_id: string; name: string; arguments: string } | { type: "function_call_output"; call_id: string; output: string };
 type ResponseApiToolDefinition = {
     type: "function";
     name: string;
@@ -53,9 +47,7 @@ type ResponseApiToolDefinition = {
     parameters: Record<string, unknown>;
     strict?: boolean;
 };
-type ResponseApiOutputItem =
-    | { type?: "message"; content?: Array<{ type?: string; text?: string }> }
-    | { type?: "function_call"; id?: string; call_id?: string; name?: string; arguments?: string };
+type ResponseApiOutputItem = { type?: "message"; content?: Array<{ type?: string; text?: string }> } | { type?: "function_call"; id?: string; call_id?: string; name?: string; arguments?: string };
 type ResponseApiPayload = {
     id?: string;
     output?: ResponseApiOutputItem[];
@@ -103,6 +95,7 @@ type GeminiPayload = {
 };
 type GeminiStreamState = { buffer: string; text: string; toolCalls: ResponseToolCall[]; error?: string };
 type RequestOptions = { signal?: AbortSignal };
+type OpenAIImageTaskEndpoint = "generations" | "edits";
 
 const QUALITY_BASE: Record<string, number> = {
     low: 1024,
@@ -125,6 +118,7 @@ const IMAGE_MAX_RATIO = 3;
 const IMAGE_OUTPUT_FORMAT = "png";
 const DEFAULT_IMAGE_POLL_INTERVAL_MS = 2500;
 const DEFAULT_IMAGE_POLL_TIMEOUT_MS = 600000;
+const FIREFLY_IMAGE_RATIOS = ["1:1", "4:3", "3:4", "16:9", "9:16"] as const;
 
 function normalizeQuality(quality: string) {
     const value = quality.trim().toLowerCase();
@@ -194,6 +188,30 @@ function resolveRequestSize(quality: string | undefined, size: string) {
     throw new Error("图像尺寸格式不支持，请使用 auto、9:16 或 1024x1024");
 }
 
+function fireflyImageTier(model: string) {
+    return model
+        .trim()
+        .toLowerCase()
+        .match(/^firefly-[a-z0-9._-]+-(1k|2k|4k)$/)?.[1]
+        ?.toUpperCase();
+}
+
+function resolveFireflyAspectRatio(size: string) {
+    const value = size.trim().toLowerCase();
+    if (!value || value === "auto") return undefined;
+    if ((FIREFLY_IMAGE_RATIOS as readonly string[]).includes(value)) return value;
+
+    const dimensions = parseImageDimensions(value);
+    if (!dimensions) throw new Error("当前 Firefly 模型仅支持 1:1、4:3、3:4、16:9 或 9:16 画幅");
+    const ratio = dimensions.width / dimensions.height;
+    const matched = FIREFLY_IMAGE_RATIOS.find((candidate) => {
+        const [width, height] = candidate.split(":").map(Number);
+        return Math.abs(ratio - width / height) < 0.02;
+    });
+    if (!matched) throw new Error("当前 Firefly 模型仅支持 1:1、4:3、3:4、16:9 或 9:16 画幅");
+    return matched;
+}
+
 function resolveImageDataUrl(item: Record<string, unknown>) {
     if (typeof item.b64_json === "string" && item.b64_json) {
         return `data:image/png;base64,${item.b64_json}`;
@@ -233,7 +251,9 @@ function resolveImageTaskId(payload: ImageTaskResponse) {
 }
 
 function normalizeImageTaskStatus(status: unknown) {
-    return String(status || "").trim().toLowerCase();
+    return String(status || "")
+        .trim()
+        .toLowerCase();
 }
 
 function isImageTaskCompleted(payload: ImageTaskResponse) {
@@ -499,12 +519,7 @@ async function requestStreamingResponse(config: AiConfig, body: Record<string, u
 }
 
 function toGeminiBody(config: AiConfig, messages: ResponseInputMessage[], extra?: Record<string, unknown>) {
-    const systemText = [
-        config.systemPrompt.trim(),
-        ...messages.flatMap((message) => (!("type" in message) && message.role === "system" ? [geminiTextContent(message.content)] : [])),
-    ]
-        .filter(Boolean)
-        .join("\n\n");
+    const systemText = [config.systemPrompt.trim(), ...messages.flatMap((message) => (!("type" in message) && message.role === "system" ? [geminiTextContent(message.content)] : []))].filter(Boolean).join("\n\n");
     const contents = toGeminiContents(messages.filter((message) => ("type" in message ? true : message.role !== "system")));
     return {
         contents,
@@ -564,10 +579,7 @@ function toGeminiToolOptions(tools: ResponseFunctionTool[], toolChoice: ToolChoi
         description: tool.function.description,
         parameters: tool.function.parameters,
     }));
-    const functionCallingConfig =
-        typeof toolChoice === "object"
-            ? { mode: "ANY", allowedFunctionNames: [toolChoice.name] }
-            : { mode: toolChoice === "required" ? "ANY" : "AUTO" };
+    const functionCallingConfig = typeof toolChoice === "object" ? { mode: "ANY", allowedFunctionNames: [toolChoice.name] } : { mode: toolChoice === "required" ? "ANY" : "AUTO" };
     return {
         tools: [{ functionDeclarations }],
         toolConfig: { functionCallingConfig },
@@ -690,6 +702,19 @@ function parseGeminiImagePayload(payload: GeminiPayload) {
 }
 
 function buildOpenAIImageGenerationBody(config: AiConfig, prompt: string, n: number, asyncMode: boolean) {
+    const fixedTier = fireflyImageTier(config.model);
+    if (fixedTier) {
+        const aspectRatio = resolveFireflyAspectRatio(config.size);
+        return {
+            model: config.model,
+            prompt: withSystemPrompt(config, prompt),
+            n,
+            image_size: fixedTier,
+            stream: false,
+            ...(aspectRatio ? { aspect_ratio: aspectRatio } : {}),
+            ...(asyncMode ? { async: true } : {}),
+        };
+    }
     const quality = normalizeQuality(config.quality);
     const requestSize = resolveRequestSize(quality, config.size);
     const responseFormat = normalizeImageResponseFormat(config.imageResponseFormat);
@@ -705,11 +730,11 @@ function buildOpenAIImageGenerationBody(config: AiConfig, prompt: string, n: num
     };
 }
 
-async function parseOpenAIImageCreatePayload(config: AiConfig, payload: ImageTaskResponse, options?: RequestOptions) {
+async function parseOpenAIImageCreatePayload(config: AiConfig, payload: ImageTaskResponse, endpoint: OpenAIImageTaskEndpoint, options?: RequestOptions) {
     const imagePayload = resolveImageTaskPayload(payload);
     if (imagePayloadHasImages(imagePayload)) return parseImagePayload(imagePayload);
     const taskId = resolveImageTaskId(payload);
-    if (taskId) return pollOpenAIImageGenerationTask(config, taskId, options);
+    if (taskId) return pollOpenAIImageTask(config, endpoint, taskId, options);
     return parseImagePayload(imagePayload);
 }
 
@@ -718,22 +743,22 @@ async function requestOpenAIImageGenerationSync(config: AiConfig, prompt: string
         headers: aiHeaders(config, "application/json"),
         signal: options?.signal,
     });
-    return parseOpenAIImageCreatePayload(config, response.data, options);
+    return parseOpenAIImageCreatePayload(config, response.data, "generations", options);
 }
 
 async function requestOpenAIImageGenerationAsync(config: AiConfig, prompt: string, n: number, options?: RequestOptions) {
     const response = await axios.post<ImageTaskResponse>(aiApiUrl(config, "/images/generations"), buildOpenAIImageGenerationBody(config, prompt, n, true), {
-        headers: aiHeaders(config, "application/json"),
+        headers: { ...aiHeaders(config, "application/json"), "Idempotency-Key": `image-${nanoid()}` },
         signal: options?.signal,
     });
     const taskId = resolveImageTaskId(response.data);
     if (!taskId && !imagePayloadHasImages(resolveImageTaskPayload(response.data))) {
         throw new Error("异步接口没有返回任务 ID");
     }
-    return parseOpenAIImageCreatePayload(config, response.data, options);
+    return parseOpenAIImageCreatePayload(config, response.data, "generations", options);
 }
 
-async function pollOpenAIImageGenerationTask(config: AiConfig, taskId: string, options?: RequestOptions) {
+async function pollOpenAIImageTask(config: AiConfig, endpoint: OpenAIImageTaskEndpoint, taskId: string, options?: RequestOptions) {
     const intervalMs = normalizeBoundedNumber(config.imagePollIntervalMs, DEFAULT_IMAGE_POLL_INTERVAL_MS, 1000, 30000);
     const timeoutMs = normalizeBoundedNumber(config.imagePollTimeoutMs, DEFAULT_IMAGE_POLL_TIMEOUT_MS, 10000, 1800000);
     const deadline = Date.now() + timeoutMs;
@@ -747,7 +772,7 @@ async function pollOpenAIImageGenerationTask(config: AiConfig, taskId: string, o
 
         let payload: ImageTaskResponse | null = null;
         try {
-            const response = await axios.get<ImageTaskResponse>(aiApiUrl(config, `/images/generations/${encodeURIComponent(taskId)}`), {
+            const response = await axios.get<ImageTaskResponse>(aiApiUrl(config, `/images/${endpoint}/${encodeURIComponent(taskId)}`), {
                 headers: aiHeaders(config),
                 signal: options?.signal,
             });
@@ -789,7 +814,7 @@ function shouldTryAsyncAfterSyncError(error: unknown) {
 
 export async function requestGeneration(config: AiConfig, prompt: string, options?: RequestOptions) {
     const requestConfig = resolveModelRequestConfig(config, config.model || config.imageModel);
-    const n = Math.max(1, Math.min(15, Math.floor(Math.abs(Number(config.count)) || 1)));
+    const n = fireflyImageTier(requestConfig.model) ? 1 : Math.max(1, Math.min(15, Math.floor(Math.abs(Number(config.count)) || 1)));
     if (requestConfig.apiFormat === "gemini") {
         try {
             return await requestGeminiImages(requestConfig, prompt, [], n, options);
@@ -801,11 +826,12 @@ export async function requestGeneration(config: AiConfig, prompt: string, option
     try {
         if (dispatchMode === "async") return await requestOpenAIImageGenerationAsync(requestConfig, prompt, n, options);
         if (dispatchMode === "sync") return await requestOpenAIImageGenerationSync(requestConfig, prompt, n, options);
+        if (fireflyImageTier(requestConfig.model)) return await requestOpenAIImageGenerationAsync(requestConfig, prompt, n, options);
         try {
             return await requestOpenAIImageGenerationSync(requestConfig, prompt, n, options);
         } catch (syncError) {
             const taskId = readTaskIdFromAxiosError(syncError);
-            if (taskId) return await pollOpenAIImageGenerationTask(requestConfig, taskId, options);
+            if (taskId) return await pollOpenAIImageTask(requestConfig, "generations", taskId, options);
             if (shouldTryAsyncAfterSyncError(syncError)) return await requestOpenAIImageGenerationAsync(requestConfig, prompt, n, options);
             throw syncError;
         }
@@ -816,7 +842,7 @@ export async function requestGeneration(config: AiConfig, prompt: string, option
 
 export async function requestEdit(config: AiConfig, prompt: string, references: ReferenceImage[], mask?: ReferenceImage, options?: RequestOptions) {
     const requestConfig = resolveModelRequestConfig(config, config.model || config.imageModel);
-    const n = Math.max(1, Math.min(15, Math.floor(Math.abs(Number(config.count)) || 1)));
+    const n = fireflyImageTier(requestConfig.model) ? 1 : Math.max(1, Math.min(15, Math.floor(Math.abs(Number(config.count)) || 1)));
     const requestPrompt = buildImageReferencePromptText(prompt, references);
     if (requestConfig.apiFormat === "gemini") {
         if (mask) throw new Error("Gemini 调用格式暂不支持蒙版编辑");
@@ -826,28 +852,56 @@ export async function requestEdit(config: AiConfig, prompt: string, references: 
             throw new Error(readAxiosError(error, "请求失败"));
         }
     }
-    const quality = normalizeQuality(config.quality);
-    const requestSize = resolveRequestSize(quality, config.size);
-    const formData = new FormData();
-    formData.set("model", requestConfig.model);
-    formData.set("prompt", withSystemPrompt(requestConfig, requestPrompt));
-    formData.set("n", String(n));
-    formData.set("response_format", "b64_json");
-    formData.set("output_format", IMAGE_OUTPUT_FORMAT);
-    if (quality) {
-        formData.set("quality", quality);
-    }
-    if (requestSize) {
-        formData.set("size", requestSize);
-    }
+    const fixedTier = fireflyImageTier(requestConfig.model);
+    const quality = fixedTier ? undefined : normalizeQuality(config.quality);
+    const requestSize = fixedTier ? undefined : resolveRequestSize(quality, config.size);
     const files = await Promise.all(references.map(async (image) => dataUrlToFile({ ...image, dataUrl: await imageToDataUrl(image) })));
-    files.forEach((file) => formData.append("image", file));
-    if (mask) formData.set("mask", dataUrlToFile(mask));
+    const maskFile = mask ? dataUrlToFile(mask) : undefined;
+    const buildFormData = (asyncMode: boolean) => {
+        const formData = new FormData();
+        formData.set("model", requestConfig.model);
+        formData.set("prompt", withSystemPrompt(requestConfig, requestPrompt));
+        formData.set("n", String(n));
+        if (asyncMode) formData.set("async", "true");
+        if (fixedTier) {
+            formData.set("image_size", fixedTier);
+            formData.set("stream", "false");
+            const aspectRatio = resolveFireflyAspectRatio(config.size);
+            if (aspectRatio) formData.set("aspect_ratio", aspectRatio);
+        } else {
+            formData.set("response_format", "b64_json");
+            formData.set("output_format", IMAGE_OUTPUT_FORMAT);
+        }
+        if (quality) formData.set("quality", quality);
+        if (requestSize) formData.set("size", requestSize);
+        files.forEach((file) => formData.append("image", file));
+        if (maskFile) formData.set("mask", maskFile);
+        return formData;
+    };
+    const submitEdit = async (asyncMode: boolean) => {
+        const response = await axios.post<ImageTaskResponse>(aiApiUrl(requestConfig, "/images/edits"), buildFormData(asyncMode), {
+            headers: { ...aiHeaders(requestConfig), ...(asyncMode ? { "Idempotency-Key": `image-${nanoid()}` } : {}) },
+            signal: options?.signal,
+        });
+        if (asyncMode && !resolveImageTaskId(response.data) && !imagePayloadHasImages(resolveImageTaskPayload(response.data))) {
+            throw new Error("异步编辑接口没有返回任务 ID");
+        }
+        return parseOpenAIImageCreatePayload(requestConfig, response.data, "edits", options);
+    };
 
     try {
-        const response = await axios.post<ImageApiResponse>(aiApiUrl(requestConfig, "/images/edits"), formData, { headers: aiHeaders(requestConfig), signal: options?.signal });
-        const images = parseImagePayload(response.data);
-        return images;
+        const dispatchMode = normalizeImageDispatchMode(requestConfig.imageDispatchMode);
+        if (dispatchMode === "async") return await submitEdit(true);
+        if (dispatchMode === "sync") return await submitEdit(false);
+        if (fixedTier) return await submitEdit(true);
+        try {
+            return await submitEdit(false);
+        } catch (syncError) {
+            const taskId = readTaskIdFromAxiosError(syncError);
+            if (taskId) return await pollOpenAIImageTask(requestConfig, "edits", taskId, options);
+            if (shouldTryAsyncAfterSyncError(syncError)) return await submitEdit(true);
+            throw syncError;
+        }
     } catch (error) {
         throw new Error(readAxiosError(error, "请求失败"));
     }
@@ -861,10 +915,18 @@ export async function requestImageQuestion(config: AiConfig, messages: AiTextMes
             if (answer === "没有返回内容") onDelta(answer);
             return answer;
         }
-        const answer = (await requestStreamingResponse(requestConfig, {
-            model: requestConfig.model,
-            input: toResponseInput(withSystemMessage(requestConfig, messages)),
-        }, onDelta, options)).content || "没有返回内容";
+        const answer =
+            (
+                await requestStreamingResponse(
+                    requestConfig,
+                    {
+                        model: requestConfig.model,
+                        input: toResponseInput(withSystemMessage(requestConfig, messages)),
+                    },
+                    onDelta,
+                    options,
+                )
+            ).content || "没有返回内容";
         if (answer === "没有返回内容") onDelta(answer);
         return answer;
     } catch (error) {
@@ -878,13 +940,18 @@ export async function requestToolResponse(config: AiConfig, messages: ResponseIn
         if (requestConfig.apiFormat === "gemini") {
             return await requestGeminiStreamingResponse(requestConfig, toGeminiBody(requestConfig, messages, toGeminiToolOptions(tools, toolChoice)), onDelta, options);
         }
-        return await requestStreamingResponse(requestConfig, {
-            model: requestConfig.model,
-            input: toResponseInput(withSystemMessage(requestConfig, messages)),
-            tools: tools.map(toResponseTool),
-            tool_choice: toolChoice,
-            parallel_tool_calls: false,
-        }, onDelta, options);
+        return await requestStreamingResponse(
+            requestConfig,
+            {
+                model: requestConfig.model,
+                input: toResponseInput(withSystemMessage(requestConfig, messages)),
+                tools: tools.map(toResponseTool),
+                tool_choice: toolChoice,
+                parallel_tool_calls: false,
+            },
+            onDelta,
+            options,
+        );
     } catch (error) {
         throw new Error(readAxiosError(error, "请求失败"));
     }

@@ -2,7 +2,7 @@ import { type ReactNode, useState } from "react";
 import { ConfigProvider, Switch } from "antd";
 
 import { type CanvasTheme } from "@/lib/canvas-theme";
-import type { AiConfig } from "@/stores/use-config-store";
+import { modelOptionName, type AiConfig } from "@/stores/use-config-store";
 
 const qualityOptions = [
     { value: "auto", label: "自动" },
@@ -48,14 +48,18 @@ type ImageSettingsPanelProps = {
 
 export function ImageSettingsPanel({ config, onConfigChange, theme, showTitle = true, className = "w-[320px] space-y-4 rounded-2xl px-1 py-0.5", maxCount = 15, quickCount = 10, showAdvancedControls = false }: ImageSettingsPanelProps) {
     const [snapDimensionToStep, setSnapDimensionToStep] = useState(true);
+    const fireflyTier = fireflyImageTier(modelOptionName(config.imageModel || config.model));
+    const availableAspectOptions = fireflyTier ? aspectOptions.filter((item) => ["1:1", "4:3", "3:4", "16:9", "9:16", "auto"].includes(item.value)) : aspectOptions;
     const quality = config.quality || "auto";
-    const count = Math.max(1, Math.min(maxCount, Math.floor(Math.abs(Number(config.count)) || 1)));
+    const effectiveMaxCount = fireflyTier ? 1 : maxCount;
+    const effectiveQuickCount = fireflyTier ? 1 : quickCount;
+    const count = Math.max(1, Math.min(effectiveMaxCount, Math.floor(Math.abs(Number(config.count)) || 1)));
     const concurrency = Math.max(1, Math.min(10, Math.floor(Math.abs(Number(config.imageConcurrency)) || 5)));
     const activeSize = config.size || "auto";
-    const selectedAspect = aspectOptions.find((item) => (item.size || item.value) === activeSize || item.value === activeSize);
-    const dimensions = readSizeDimensions(activeSize, selectedAspect || aspectOptions[0]);
+    const selectedAspect = availableAspectOptions.find((item) => (item.size || item.value) === activeSize || item.value === activeSize);
+    const dimensions = readSizeDimensions(activeSize, selectedAspect || availableAspectOptions[0]);
     const selectAspect = (value: string) => {
-        const option = aspectOptions.find((item) => item.value === value);
+        const option = availableAspectOptions.find((item) => item.value === value);
         onConfigChange("size", option?.size || option?.value || "auto");
     };
     const updateDimension = (key: "width" | "height", value: number | null) => {
@@ -77,38 +81,47 @@ export function ImageSettingsPanel({ config, onConfigChange, theme, showTitle = 
                 }}
             >
                 {showTitle ? <div className="text-lg font-semibold">图像设置</div> : null}
-                <div className="space-y-2.5">
-                    <SettingTitle color={theme.node.muted}>质量</SettingTitle>
-                    <div className="grid grid-cols-4 gap-2.5">
-                        {qualityOptions.map((item) => (
-                            <OptionPill key={item.value} selected={quality === item.value} theme={theme} onClick={() => onConfigChange("quality", item.value)}>
-                                {item.label}
-                            </OptionPill>
-                        ))}
+                {fireflyTier ? (
+                    <div className="space-y-2.5">
+                        <SettingTitle color={theme.node.muted}>输出档位</SettingTitle>
+                        <div className="text-sm font-medium">{fireflyTier}</div>
                     </div>
-                </div>
-                <div className="space-y-2.5">
-                    <div className="flex items-center justify-between gap-3">
-                        <SettingTitle color={theme.node.muted}>尺寸</SettingTitle>
-                        <div className="flex items-center gap-2">
-                            <span className="text-xs font-medium" style={{ color: theme.node.muted }}>
-                                16倍数对齐
-                            </span>
-                            <span title="输入完成后自动向上补成 16 的倍数" onMouseDown={(event) => event.stopPropagation()}>
-                                <Switch size="small" checked={snapDimensionToStep} onChange={setSnapDimensionToStep} />
-                            </span>
+                ) : (
+                    <>
+                        <div className="space-y-2.5">
+                            <SettingTitle color={theme.node.muted}>质量</SettingTitle>
+                            <div className="grid grid-cols-4 gap-2.5">
+                                {qualityOptions.map((item) => (
+                                    <OptionPill key={item.value} selected={quality === item.value} theme={theme} onClick={() => onConfigChange("quality", item.value)}>
+                                        {item.label}
+                                    </OptionPill>
+                                ))}
+                            </div>
                         </div>
-                    </div>
-                    <div className="grid grid-cols-[1fr_auto_1fr] items-center gap-2.5">
-                        <DimensionInput prefix="W" value={dimensions.width} disabled={activeSize === "auto"} theme={theme} alignToStep={snapDimensionToStep} onChange={(value) => updateDimension("width", value)} />
-                        <span className="text-lg opacity-45">↔</span>
-                        <DimensionInput prefix="H" value={dimensions.height} disabled={activeSize === "auto"} theme={theme} alignToStep={snapDimensionToStep} onChange={(value) => updateDimension("height", value)} />
-                    </div>
-                </div>
+                        <div className="space-y-2.5">
+                            <div className="flex items-center justify-between gap-3">
+                                <SettingTitle color={theme.node.muted}>尺寸</SettingTitle>
+                                <div className="flex items-center gap-2">
+                                    <span className="text-xs font-medium" style={{ color: theme.node.muted }}>
+                                        16倍数对齐
+                                    </span>
+                                    <span title="输入完成后自动向上补成 16 的倍数" onMouseDown={(event) => event.stopPropagation()}>
+                                        <Switch size="small" checked={snapDimensionToStep} onChange={setSnapDimensionToStep} />
+                                    </span>
+                                </div>
+                            </div>
+                            <div className="grid grid-cols-[1fr_auto_1fr] items-center gap-2.5">
+                                <DimensionInput prefix="W" value={dimensions.width} disabled={activeSize === "auto"} theme={theme} alignToStep={snapDimensionToStep} onChange={(value) => updateDimension("width", value)} />
+                                <span className="text-lg opacity-45">↔</span>
+                                <DimensionInput prefix="H" value={dimensions.height} disabled={activeSize === "auto"} theme={theme} alignToStep={snapDimensionToStep} onChange={(value) => updateDimension("height", value)} />
+                            </div>
+                        </div>
+                    </>
+                )}
                 <div className="space-y-2.5">
                     <SettingTitle color={theme.node.muted}>宽高比</SettingTitle>
                     <div className="grid grid-cols-4 gap-2.5">
-                        {aspectOptions.map((item) => (
+                        {availableAspectOptions.map((item) => (
                             <button
                                 key={item.value}
                                 type="button"
@@ -126,12 +139,12 @@ export function ImageSettingsPanel({ config, onConfigChange, theme, showTitle = 
                 <div className="space-y-2.5">
                     <SettingTitle color={theme.node.muted}>生成张数</SettingTitle>
                     <div className="grid grid-cols-4 gap-2.5">
-                        {Array.from({ length: quickCount }, (_, index) => index + 1).map((value) => (
+                        {Array.from({ length: effectiveQuickCount }, (_, index) => index + 1).map((value) => (
                             <OptionPill key={value} selected={count === value} theme={theme} onClick={() => onConfigChange("count", String(value))}>
                                 {value} 张
                             </OptionPill>
                         ))}
-                        <CountInput value={count} max={maxCount} theme={theme} onChange={(value) => onConfigChange("count", String(value || 1))} />
+                        <CountInput value={count} max={effectiveMaxCount} theme={theme} onChange={(value) => onConfigChange("count", String(value || 1))} />
                     </div>
                 </div>
                 {showAdvancedControls ? (
@@ -162,6 +175,14 @@ export function ImageSettingsPanel({ config, onConfigChange, theme, showTitle = 
             </div>
         </ImageSettingsTheme>
     );
+}
+
+function fireflyImageTier(model: string) {
+    return model
+        .trim()
+        .toLowerCase()
+        .match(/^firefly-[a-z0-9._-]+-(1k|2k|4k)$/)?.[1]
+        ?.toUpperCase();
 }
 
 export function ImageSettingsTheme({ theme, children }: { theme: CanvasTheme; children: ReactNode }) {
