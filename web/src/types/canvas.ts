@@ -1,3 +1,5 @@
+import type { VideoGenerationTask } from "@/types/media";
+
 export type Position = {
     x: number;
     y: number;
@@ -56,6 +58,8 @@ export type CanvasNodeMetadata = {
     mimeType?: string;
     bytes?: number;
     durationMs?: number;
+    videoIdempotencyKey?: string;
+    videoTask?: VideoGenerationTask;
 };
 
 export type CanvasNodeData = {
