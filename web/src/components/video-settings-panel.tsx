@@ -1,8 +1,21 @@
-import { type ReactNode } from "react";
+import { type ReactNode, useEffect } from "react";
 import { Switch } from "antd";
 
 import { ImageSettingsTheme } from "@/components/image-settings-panel";
-import { boolConfig, isSeedanceVideoConfig, normalizeSeedanceDuration, normalizeSeedanceRatio, normalizeSeedanceResolution, seedanceDurationOptions, seedancePixelLabel, seedanceRatioOptions, seedanceResolutionOptions } from "@/lib/seedance-video";
+import {
+    boolConfig,
+    isArkPlanBaseUrl,
+    isSeedancePerSecondModel,
+    isSeedanceVideoConfig,
+    normalizeSeedanceDuration,
+    normalizeSeedanceRatio,
+    normalizeSeedanceResolution,
+    seedanceDurationOptions,
+    seedanceFixedResolution,
+    seedancePixelLabel,
+    seedanceRatioOptions,
+    seedanceResolutionOptions,
+} from "@/lib/seedance-video";
 import { type CanvasTheme } from "@/lib/canvas-theme";
 import { modelOptionName, type AiConfig } from "@/stores/use-config-store";
 
@@ -31,11 +44,36 @@ type VideoSettingsPanelProps = {
 };
 
 export function VideoSettingsPanel({ config, onConfigChange, theme, showTitle = true, className = "w-[320px] space-y-4 rounded-2xl px-1 py-0.5" }: VideoSettingsPanelProps) {
-    if (isSeedanceVideoConfig(config)) {
+    const model = modelOptionName(config.videoModel || config.model);
+    const seedanceConfig = isSeedanceVideoConfig(config);
+
+    useEffect(() => {
+        if (seedanceConfig) return;
+        const nextProfile = videoSettingsProfile(model);
+        const resolution = normalizeVideoResolutionValue(config.vquality);
+        if (!nextProfile.customResolution && !nextProfile.resolutions.some((item) => item.value === resolution)) {
+            onConfigChange("vquality", nextProfile.resolutions[0]?.value || "720");
+        }
+
+        const size = normalizeVideoSizeValue(config.size);
+        if (!nextProfile.customSize && (config.size !== size || !nextProfile.sizes.some((item) => item.value === size))) {
+            const nextSize = nextProfile.sizes.some((item) => item.value === size) ? size : nextProfile.sizes[0]?.value;
+            if (nextSize) onConfigChange("size", nextSize);
+        }
+
+        const seconds = Number(config.videoSeconds);
+        if (!nextProfile.customSeconds && !nextProfile.seconds.includes(seconds)) {
+            const fallback = nextProfile.seconds[0] || 6;
+            const nextSeconds = nextProfile.seconds.reduce((closest, value) => (Math.abs(value - seconds) < Math.abs(closest - seconds) ? value : closest), fallback);
+            onConfigChange("videoSeconds", String(nextSeconds));
+        }
+    }, [config.size, config.videoSeconds, config.vquality, model, onConfigChange, seedanceConfig]);
+
+    if (seedanceConfig) {
         return <SeedanceVideoSettingsPanel config={config} onConfigChange={onConfigChange} theme={theme} showTitle={showTitle} className={className} />;
     }
 
-    const profile = videoSettingsProfile(modelOptionName(config.videoModel || config.model));
+    const profile = videoSettingsProfile(model);
     const seconds = config.videoSeconds || "6";
     const size = normalizeVideoSizeValue(config.size);
     const dimensions = readSizeDimensions(size);
@@ -102,12 +140,18 @@ export function VideoSettingsPanel({ config, onConfigChange, theme, showTitle = 
 function SeedanceVideoSettingsPanel({ config, onConfigChange, theme, showTitle, className }: VideoSettingsPanelProps) {
     const model = modelOptionName(config.videoModel || config.model);
     const fixedResolution = seedanceFixedResolution(model);
+    const perSecondModel = isSeedancePerSecondModel(model);
     const resolution = fixedResolution || normalizeSeedanceResolution(config.vquality, model);
     const resolutionChoices = fixedResolution ? [{ value: fixedResolution, label: fixedResolution.toUpperCase() }] : seedanceResolutionOptions.filter((item) => item.value !== "1080p");
     const ratio = normalizeSeedanceRatio(config.size);
-    const duration = normalizeSeedanceDuration(config.videoSeconds);
+    const supportsSmartDuration = isArkPlanBaseUrl(config.baseUrl);
+    const normalizedDuration = normalizeSeedanceDuration(config.videoSeconds);
+    const duration = normalizedDuration === -1 && !supportsSmartDuration ? 5 : normalizedDuration;
+    const durationChoices = supportsSmartDuration ? seedanceDurationOptions : seedanceDurationOptions.filter((value) => value > 0);
     const generateAudio = boolConfig(config.videoGenerateAudio, true);
     const watermark = boolConfig(config.videoWatermark, false);
+    const showGenerateAudio = supportsSmartDuration || !perSecondModel;
+    const showWatermark = supportsSmartDuration;
 
     return (
         <ImageSettingsTheme theme={theme}>
@@ -143,29 +187,25 @@ function SeedanceVideoSettingsPanel({ config, onConfigChange, theme, showTitle, 
                 </SettingGroup>
                 <SettingGroup title="时长" color={theme.node.muted}>
                     <div className="grid grid-cols-4 gap-2.5">
-                        {seedanceDurationOptions.map((value) => (
+                        {durationChoices.map((value) => (
                             <OptionPill key={value} selected={duration === value} theme={theme} onClick={() => onConfigChange("videoSeconds", String(value))}>
                                 {value === -1 ? "智能" : `${value}s`}
                             </OptionPill>
                         ))}
                     </div>
-                    <NumberInput value={String(duration)} min={-1} max={15} theme={theme} onChange={(value) => onConfigChange("videoSeconds", value)} />
+                    <NumberInput value={String(duration)} min={supportsSmartDuration ? -1 : 4} max={15} theme={theme} onChange={(value) => onConfigChange("videoSeconds", value)} />
                 </SettingGroup>
-                <SettingGroup title="输出" color={theme.node.muted}>
-                    <div className="grid gap-2 rounded-xl border p-2.5" style={{ borderColor: theme.node.stroke }}>
-                        <SwitchRow label="生成声音" checked={generateAudio} theme={theme} onChange={(checked) => onConfigChange("videoGenerateAudio", String(checked))} />
-                        <SwitchRow label="添加水印" checked={watermark} theme={theme} onChange={(checked) => onConfigChange("videoWatermark", String(checked))} />
-                    </div>
-                </SettingGroup>
+                {showGenerateAudio || showWatermark ? (
+                    <SettingGroup title="输出" color={theme.node.muted}>
+                        <div className="grid gap-2 rounded-xl border p-2.5" style={{ borderColor: theme.node.stroke }}>
+                            {showGenerateAudio ? <SwitchRow label="生成声音" checked={generateAudio} theme={theme} onChange={(checked) => onConfigChange("videoGenerateAudio", String(checked))} /> : null}
+                            {showWatermark ? <SwitchRow label="添加水印" checked={watermark} theme={theme} onChange={(checked) => onConfigChange("videoWatermark", String(checked))} /> : null}
+                        </div>
+                    </SettingGroup>
+                ) : null}
             </div>
         </ImageSettingsTheme>
     );
-}
-
-function seedanceFixedResolution(model: string) {
-    const match = model.toLowerCase().match(/(?:^|[-_])(480p|720p|1080p|2160p|4k)(?:$|[-_])/);
-    if (!match) return "";
-    return match[1] === "2160p" ? "4k" : match[1];
 }
 
 function videoSettingsProfile(model: string) {
@@ -182,12 +222,7 @@ function videoSettingsProfile(model: string) {
     if (value.includes("grok") && value.includes("1.5")) return fixed(defaultResolutionOptions, landscapePortrait, [4, 6, 8, 10, 12, 15]);
     if (value.includes("grok")) return { ...fixed(defaultResolutionOptions, defaultSizeOptions, [4, 6, 8, 10, 12, 15]), customSize: true };
     if (value.includes("omni")) return fixed([{ value: "720", label: "720p" }], landscapePortrait, [10]);
-    if (value.includes("sora"))
-        return fixed(
-            [{ value: "720", label: "720p" }],
-            defaultSizeOptions.filter((item) => ["1280x720", "720x1280", "1024x1024"].includes(item.value)),
-            [4, 8, 12],
-        );
+    if (value.includes("sora")) return fixed([{ value: "720", label: "720p" }], landscapePortrait, [4, 8, 12]);
     if (value.includes("veo"))
         return fixed(
             [

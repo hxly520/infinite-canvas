@@ -3,7 +3,19 @@ import axios from "axios";
 import { dataUrlToFile } from "@/lib/image-utils";
 import { getMediaBlob, uploadMediaFile, type UploadedFile } from "@/services/file-storage";
 import { imageToDataUrl } from "@/services/image-storage";
-import { boolConfig, buildSeedancePromptText, isArkPlanBaseUrl, isSeedanceVideoModel, normalizeSeedanceDuration, normalizeSeedanceRatio, normalizeSeedanceResolution, seedanceVideoReferenceError, SEEDANCE_REFERENCE_LIMITS } from "@/lib/seedance-video";
+import {
+    boolConfig,
+    buildSeedancePromptText,
+    isArkPlanBaseUrl,
+    isSeedancePerSecondModel,
+    isSeedanceVideoModel,
+    normalizeSeedanceDuration,
+    normalizeSeedanceRatio,
+    normalizeSeedanceResolution,
+    seedanceFixedResolution,
+    seedanceVideoReferenceError,
+    SEEDANCE_REFERENCE_LIMITS,
+} from "@/lib/seedance-video";
 import { buildApiUrl, modelMatchesCapability, modelOptionName, resolveModelRequestConfig, type AiConfig } from "@/stores/use-config-store";
 import type { ReferenceImage } from "@/types/image";
 import type { ReferenceAudio, ReferenceVideo, VideoGenerationResult, VideoGenerationTask, VideoGenerationTaskState } from "@/types/media";
@@ -42,6 +54,8 @@ type RequestOptions = {
     onTaskChange?: (task: VideoGenerationTask) => void | Promise<void>;
 };
 
+export type VideoReferenceLimits = { images: number; videos: number; audios: number };
+
 const OPENAI_VIDEO_POLL_DELAY_MS = 5000;
 const OPENAI_VIDEO_MAX_ATTEMPTS = 360;
 const MANAGED_VIDEO_ORIGIN = "https://image.52token.org";
@@ -62,6 +76,19 @@ export class VideoGenerationPollingPausedError extends Error {
         super(message);
         this.name = "VideoGenerationPollingPausedError";
     }
+}
+
+export function videoReferenceLimits(model: string): VideoReferenceLimits {
+    const value = modelOptionName(model).toLowerCase();
+    if (value.includes("grok") && value.includes("1.5")) return { images: 1, videos: 0, audios: 0 };
+    if (value.includes("grok")) return { images: 7, videos: 1, audios: 0 };
+    if (isSeedancePerSecondModel(value)) return { images: 9, videos: 3, audios: 3 };
+    if (isSeedanceVideoModel(value)) return { images: 4, videos: 3, audios: 1 };
+    if (value.includes("omni-v2v")) return { images: 0, videos: 1, audios: 0 };
+    if (value.includes("omni")) return { images: 5, videos: 0, audios: 0 };
+    if (value.includes("sora")) return { images: 0, videos: 0, audios: 0 };
+    if (value.includes("veo")) return { images: 3, videos: 0, audios: 0 };
+    return { images: 7, videos: 3, audios: 3 };
 }
 
 class VideoGenerationPollRequestError extends Error {
@@ -106,7 +133,9 @@ export async function createVideoGenerationTask(config: AiConfig, prompt: string
 function selectVideoModel(config: AiConfig) {
     const currentModel = config.model.trim();
     if (currentModel && modelMatchesCapability(currentModel, "video")) return currentModel;
-    return (config.videoModel || currentModel).trim();
+    const configuredVideoModel = config.videoModel.trim();
+    if (configuredVideoModel && modelMatchesCapability(configuredVideoModel, "video")) return configuredVideoModel;
+    return "";
 }
 
 export async function pollVideoGenerationTask(config: AiConfig, task: VideoGenerationTask, options?: RequestOptions): Promise<VideoGenerationTaskState> {
@@ -251,8 +280,6 @@ async function createOpenAIVideoMultipartTask(config: AiConfig, model: string, p
     body.append("prompt", prompt.trim());
     const aspectRatio = normalizeOpenAIVideoAspectRatio(config.size);
     if (aspectRatio) body.append("aspect_ratio", aspectRatio);
-    body.append("duration", "10");
-    body.append("resolution", "720p");
 
     if (adapter.payloadBuilder === "omni-frame") {
         if (videoReferences.length || audioReferences.length) throw new Error("Omni 图生视频暂不支持参考视频或参考音频");
@@ -286,8 +313,9 @@ async function createOpenAIVideoMultipartTask(config: AiConfig, model: string, p
 async function buildOpenAIVideoPayload(config: AiConfig, model: string, prompt: string, references: ReferenceImage[], videoReferences: ReferenceVideo[], audioReferences: ReferenceAudio[], adapter: OpenAIVideoAdapter) {
     const requestModel = modelOptionName(model);
     const imageUrls = await Promise.all(references.map((image) => resolveSeedanceImageUrl(config, image)));
-    const videoUrls = await Promise.all(videoReferences.map((video) => resolveSeedanceVideoUrl(video)));
-    const audioUrls = await Promise.all(audioReferences.map((audio) => resolveSeedanceAudioUrl(audio)));
+    const requiresHttpsReferenceMedia = adapter.payloadBuilder === "seedance-flat" || adapter.payloadBuilder === "grok";
+    const videoUrls = await Promise.all(videoReferences.map((video) => resolveSeedanceVideoUrl(video, requiresHttpsReferenceMedia)));
+    const audioUrls = await Promise.all(audioReferences.map((audio) => resolveSeedanceAudioUrl(audio, requiresHttpsReferenceMedia)));
     const aspectRatio = normalizeOpenAIVideoAspectRatio(config.size);
     const resolution = normalizeOpenAIVideoResolution(config.vquality, requestModel);
     const seconds = Number(normalizeVideoSeconds(config.videoSeconds));
@@ -301,20 +329,21 @@ async function buildOpenAIVideoPayload(config: AiConfig, model: string, prompt: 
     switch (adapter.payloadBuilder) {
         case "seedance-flat": {
             if (audioUrls.length && !imageUrls.length && !videoUrls.length) throw new Error("Seedance 参考音频不能单独使用，请同时添加参考图或参考视频");
-            assertSeedanceVideoReferences(videoReferences);
+            assertSeedanceVideoReferences(videoReferences, requestModel);
             assertSeedanceAudioReferences(audioReferences);
-            const perSecond = hasFixedVideoResolution(requestModel);
+            const perSecond = isSeedancePerSecondModel(requestModel);
             assertReferenceLimit(imageUrls, perSecond ? 9 : 4, "参考图");
             assertReferenceLimit(videoUrls, 3, "参考视频");
             assertReferenceLimit(audioUrls, perSecond ? 3 : 1, "参考音频");
             if ((videoUrls.length || audioUrls.length) && !imageUrls.length) throw new Error("Seedance 参考视频或音频需要至少同时添加 1 张参考图");
             payload.prompt = buildSeedancePromptText(prompt, references, videoReferences, audioReferences);
             const duration = normalizeSeedanceDuration(config.videoSeconds);
-            if (duration > 0) payload.duration = duration;
-            payload.resolution = normalizeSeedanceModelResolution(config.vquality, requestModel);
-            payload.generate_audio = boolConfig(config.videoGenerateAudio, true);
-            payload.watermark = boolConfig(config.videoWatermark, false);
-            applyFrameOrReferenceImages(payload, imageUrls, !videoUrls.length && !audioUrls.length);
+            payload.duration = duration > 0 ? duration : 5;
+            if (!perSecond) {
+                payload.resolution = normalizeSeedanceModelResolution(config.vquality, requestModel);
+                payload.audio = boolConfig(config.videoGenerateAudio, true);
+            }
+            applySeedanceImageReferences(payload, imageUrls);
             if (videoUrls.length) payload.reference_videos = videoUrls;
             if (audioUrls.length) payload.reference_audios = audioUrls;
             return payload;
@@ -330,9 +359,10 @@ async function buildOpenAIVideoPayload(config: AiConfig, model: string, prompt: 
                 assertReferenceLimit(imageUrls, 7, "参考图");
                 assertReferenceLimit(videoUrls, 1, "参考视频");
             }
-            payload.seconds = normalizeAllowedDuration(seconds, [4, 6, 8, 10, 12, 15], 6);
+            const duration = normalizeAllowedDuration(seconds, [4, 6, 8, 10, 12, 15], 6);
+            payload.seconds = imageUrls.length > 1 ? Math.min(duration, 10) : duration;
             payload.resolution = resolution === "480p" ? "480p" : "720p";
-            applyImageReferences(payload, imageUrls);
+            if (imageUrls.length) payload.image_urls = imageUrls;
             if (videoUrls.length) payload.video_url = videoUrls[0];
             return payload;
         }
@@ -340,18 +370,14 @@ async function buildOpenAIVideoPayload(config: AiConfig, model: string, prompt: 
             if (imageUrls.length || audioUrls.length) throw new Error("Omni V2V 仅支持 1 个参考视频，请移除参考图或参考音频");
             if (videoUrls.length !== 1) throw new Error("Omni V2V 需要且只能使用 1 个参考视频");
             payload.video_url = videoUrls[0];
-            payload.duration = 10;
-            payload.resolution = "720p";
             payload.aspect_ratio = normalizeTwoWayAspectRatio(aspectRatio);
             return payload;
         }
         case "omni-frame": {
             if (videoUrls.length || audioUrls.length) throw new Error("Omni 图生视频暂不支持参考视频或参考音频");
             assertReferenceLimit(imageUrls, 5, "参考图");
-            payload.duration = 10;
-            payload.resolution = "720p";
             payload.aspect_ratio = normalizeTwoWayAspectRatio(aspectRatio);
-            applyFrameOrReferenceImages(payload, imageUrls, imageUrls.length === 2);
+            applyImageReferences(payload, imageUrls);
             return payload;
         }
         case "sora2": {
@@ -359,10 +385,8 @@ async function buildOpenAIVideoPayload(config: AiConfig, model: string, prompt: 
             if (imageUrls.length) throw new Error("当前 Sora 中转模型不支持参考图片，请使用文生视频");
             const duration = normalizeSoraDuration(config.videoSeconds);
             payload.duration = duration;
-            payload.seconds = duration;
-            payload.sora2_duration = duration;
-            payload.size = normalizeSoraSize(config.size);
             payload.aspect_ratio = normalizeTwoWayAspectRatio(aspectRatio);
+            payload.generate_audio = boolConfig(config.videoGenerateAudio, true);
             return payload;
         }
         case "veo": {
@@ -371,6 +395,7 @@ async function buildOpenAIVideoPayload(config: AiConfig, model: string, prompt: 
             payload.duration = normalizeAllowedDuration(seconds, [4, 6, 8], 6);
             payload.resolution = resolution === "1080p" ? "1080p" : "720p";
             payload.aspect_ratio = normalizeTwoWayAspectRatio(aspectRatio);
+            payload.generate_audio = boolConfig(config.videoGenerateAudio, true);
             if (imageUrls.length) payload.reference_image_urls = imageUrls;
             return payload;
         }
@@ -518,13 +543,10 @@ async function pollSeedanceTask(config: AiConfig, task: VideoGenerationTask, opt
     }
 }
 
-function applyFrameOrReferenceImages(payload: Record<string, unknown>, imageUrls: string[], useFrames: boolean) {
-    if (useFrames && imageUrls.length === 2) {
-        payload.first_image_url = imageUrls[0];
-        payload.last_image_url = imageUrls[1];
-        return;
-    }
-    applyImageReferences(payload, imageUrls);
+function applySeedanceImageReferences(payload: Record<string, unknown>, imageUrls: string[]) {
+    if (!imageUrls.length) return;
+    payload.image_url = imageUrls[0];
+    if (imageUrls.length > 1) payload.reference_image_urls = imageUrls.slice(1);
 }
 
 function applyImageReferences(payload: Record<string, unknown>, imageUrls: string[]) {
@@ -558,22 +580,12 @@ function normalizeOpenAIVideoResolution(value: string, model = "") {
 }
 
 function normalizeSeedanceModelResolution(value: string, model: string) {
-    const modelValue = model.toLowerCase();
-    if (modelValue.includes("4k")) return "4k";
-    if (modelValue.includes("1080p")) return "1080p";
-    if (modelValue.includes("720p")) return "720p";
-    if (modelValue.includes("480p")) return "480p";
-    return normalizeSeedanceResolution(value, model);
+    return seedanceFixedResolution(model) || normalizeSeedanceResolution(value, model);
 }
 
 function normalizeSoraDuration(value: string) {
     const seconds = Number(normalizeVideoSeconds(value));
     return normalizeAllowedDuration(seconds, [4, 8, 12], 8);
-}
-
-function normalizeSoraSize(value: string) {
-    const normalized = normalizeVideoSize(value);
-    return normalized && ["1280x720", "720x1280", "1024x1024"].includes(normalized) ? normalized : "1280x720";
 }
 
 function normalizeAllowedDuration(value: number, allowed: number[], fallback: number) {
@@ -583,10 +595,6 @@ function normalizeAllowedDuration(value: number, allowed: number[], fallback: nu
 
 function normalizeTwoWayAspectRatio(value: string) {
     return value === "9:16" ? "9:16" : "16:9";
-}
-
-function hasFixedVideoResolution(model: string) {
-    return /(?:^|[-_])(480p|720p|1080p|2160p|4k)(?:$|[-_])/i.test(model);
 }
 
 function normalizeTaskStatus(value: string | undefined) {
@@ -644,8 +652,8 @@ export function createVideoGenerationIdempotencyKey() {
     return `video-${Date.now()}-${Math.random().toString(36).slice(2)}`;
 }
 
-function assertSeedanceVideoReferences(videoReferences: ReferenceVideo[]) {
-    const error = seedanceVideoReferenceError(videoReferences);
+function assertSeedanceVideoReferences(videoReferences: ReferenceVideo[], model = "") {
+    const error = seedanceVideoReferenceError(videoReferences, model);
     if (error) throw new Error(error);
     let total = 0;
     for (const video of videoReferences) {
@@ -694,8 +702,13 @@ async function resolveSeedanceImageUrl(config: AiConfig, image: ReferenceImage) 
     return dataUrl;
 }
 
-async function resolveSeedanceVideoUrl(video: ReferenceVideo) {
-    if (isPublicMediaUrl(video.url) || video.url.startsWith("asset://")) return video.url;
+async function resolveSeedanceVideoUrl(video: ReferenceVideo, requireHttps = false) {
+    if (isHttpsMediaUrl(video.url)) return video.url;
+    if (isPublicMediaUrl(video.url) || video.url.startsWith("asset://")) {
+        if (requireHttps) throw new Error("参考视频仅支持 HTTPS 直链，请使用链接方式添加");
+        return video.url;
+    }
+    if (requireHttps) throw new Error("参考视频仅支持 HTTPS 直链，请使用链接方式添加");
     let blob: Blob | null = null;
     if (video.storageKey) blob = await getMediaBlob(video.storageKey);
     if (!blob && video.url?.startsWith("blob:")) blob = await (await fetch(video.url)).blob();
@@ -712,8 +725,13 @@ async function resolveReferenceMediaBlob(video: ReferenceVideo) {
     return null;
 }
 
-async function resolveSeedanceAudioUrl(audio: ReferenceAudio) {
-    if (isPublicMediaUrl(audio.url) || audio.url.startsWith("asset://")) return audio.url;
+async function resolveSeedanceAudioUrl(audio: ReferenceAudio, requireHttps = false) {
+    if (isHttpsMediaUrl(audio.url)) return audio.url;
+    if (isPublicMediaUrl(audio.url) || audio.url.startsWith("asset://")) {
+        if (requireHttps) throw new Error("参考音频仅支持 HTTPS 直链，请使用链接方式添加");
+        return audio.url;
+    }
+    if (requireHttps) throw new Error("参考音频仅支持 HTTPS 直链，请使用链接方式添加");
     let blob: Blob | null = null;
     if (audio.storageKey) blob = await getMediaBlob(audio.storageKey);
     if (!blob && audio.url?.startsWith("blob:")) blob = await (await fetch(audio.url)).blob();
@@ -879,6 +897,10 @@ async function assertVideoBlob(blob: Blob) {
 
 function isPublicMediaUrl(value: string) {
     return /^https?:\/\//i.test(value || "");
+}
+
+function isHttpsMediaUrl(value: string) {
+    return /^https:\/\//i.test(value || "");
 }
 
 function delay(ms: number, signal?: AbortSignal) {
