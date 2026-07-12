@@ -765,9 +765,10 @@ function resolveManagedVideoDownload(rawUrl: string, config: AiConfig) {
     if (!value || value.startsWith("//")) return null;
     try {
         const gateway = new URL(config.baseUrl.trim());
-        const target = value.startsWith("/") ? new URL(value, gateway.origin) : new URL(value);
+        const relativeEdgePath = value.startsWith(EDGE_VIDEO_PATH_PREFIX);
+        const target = value.startsWith("/") ? new URL(value, relativeEdgePath ? MANAGED_VIDEO_ORIGIN : gateway.origin) : new URL(value);
         const edgePath = target.pathname.startsWith(EDGE_VIDEO_PATH_PREFIX);
-        if (target.origin === gateway.origin) return { url: target.toString(), withAuth: !edgePath };
+        if (target.origin === gateway.origin && !edgePath) return { url: target.toString(), withAuth: true };
         if (target.origin === MANAGED_VIDEO_ORIGIN && edgePath) return { url: target.toString(), withAuth: false };
         return null;
     } catch {

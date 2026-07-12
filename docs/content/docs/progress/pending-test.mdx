@@ -8,9 +8,9 @@ description: 当前版本已实现但仍需人工验证的变更项
 - 画布生图/视频：画布节点和配置节点生成时以当前选择的模型为准，并同步到对应生图/视频/文本/音频字段；需验证选择 `seedance-2.0` 时请求模型不再被历史 `seedance-2.0-fast-480p` 覆盖。
 - 视频生成兼容：视频工作台和画布已按模型适配 Seedance 标准/按秒、Grok、Omni、Sora、Veo 的中转协议；Seedance 按秒模型隐藏无效的声音/水印开关，标准模型保留声音开关，旧火山接口继续保留声音和水印。模拟链路已通过，仍需按生产已配置模型逐项验证文生视频、图生视频和支持的参考素材组合。
 - 视频长任务：创建后保存公开任务 ID 和幂等键，刷新或短暂查询失败后可继续轮询原任务；本地模拟已确认只创建一次任务，后续只执行 GET 查询，仍需生产验证失败不扣费、成功只扣费一次。
-- 视频媒体地址：工作台只接受当前中转域名或 `https://video.52token.org/v1/video-content/*` 返回的视频，并在浏览器本地保存 Blob；本地同域下载已通过，仍需启用 Edge Worker 后验证浏览器 Network、页面、下载文件和错误提示均不暴露上游 URL。
+- 视频媒体地址：`image.52token.org` 只用于工作台和生成 API，工作台只接受 `https://video.52token.org/v1/video-content/*` 作为生成结果代理地址，并在浏览器本地保存 Blob；本地同域下载已通过，仍需启用 Edge Worker 后验证浏览器 Network、页面、下载文件和错误提示均不暴露上游 URL。
 - 52Token 生图工作台：默认渠道改为 `https://image.52token.org`，预置 Image2 OpenAI 调用格式和 Gemini banana 调用格式，需验证用户填写分组 Key 后可直接生图。
-- OpenAI 兼容生图：主分组和 Firefly 备用模型在自动模式下均先执行一次同步请求；仅当上游明确以 400/405/409/422 拒绝并要求异步时，才创建一次异步任务，随后只轮询 `/images/generations/{id}` 或 `/images/edits/{id}`。结果只接受 data URL 或自有 `/v1/image-content/*` 代理地址，下载后立即保存到浏览器 IndexedDB 并使用本地 Blob 预览；类型检查和构建已通过，仍需用生产主/备用分组验证同步、异步和 Gemini 生图均可用且只结算一次。
+- OpenAI 兼容生图：主分组和 Firefly 备用模型在自动模式下均先执行一次同步请求；仅当上游明确以 400/405/409/422 拒绝并要求异步时，才创建一次异步任务，随后只轮询 `/images/generations/{id}` 或 `/images/edits/{id}`。生成请求继续调用 `image.52token.org`，结果只接受 data URL 或 `https://video.52token.org/v1/image-content/*` 代理地址，下载后立即保存到浏览器 IndexedDB 并使用本地 Blob 预览；类型检查和构建已通过，仍需用生产主/备用分组验证同步、异步和 Gemini 生图均可用且只结算一次。
 - 批量生图：新增并发限制，默认并发 5、最高 10；需验证批量生成不会一次性打满所有请求，失败项只在用户手动重试时重新创建任务。
 - Docker 部署：Compose 默认绑定 `127.0.0.1:15731`，需配合 Nginx 根路径反代，同时确认 `/v1/images/*` 和 `/v1beta/models/*` 仍由 sub2api 处理。
 - 提示词库：新增 `xianyu110/awesome-gptimage2` 来源，加载结果会过滤空提示词、无图和重复条目，需验证提示词中心和画布内提示词弹窗分页滚动正常。
