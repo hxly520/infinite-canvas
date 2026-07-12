@@ -11,7 +11,6 @@ const qualityOptions = [
     { value: "low", label: "低" },
 ];
 const dispatchOptions = [
-    { value: "auto", label: "自动", title: "自动：同步优先，只有明确需要异步时才切换" },
     { value: "sync", label: "同步", title: "同步：保持 OpenAI Images 原有请求方式" },
     { value: "async", label: "异步", title: "异步：创建任务后轮询结果，适合长时间生图上游" },
 ] as const;
@@ -151,9 +150,9 @@ export function ImageSettingsPanel({ config, onConfigChange, theme, showTitle = 
                     <>
                         <div className="space-y-2.5">
                             <SettingTitle color={theme.node.muted}>接口模式</SettingTitle>
-                            <div className="grid grid-cols-3 gap-2.5">
+                            <div className="grid grid-cols-2 gap-2.5">
                                 {dispatchOptions.map((item) => (
-                                    <OptionPill key={item.value} selected={(config.imageDispatchMode || "auto") === item.value} theme={theme} title={item.title} onClick={() => onConfigChange("imageDispatchMode", item.value)}>
+                                    <OptionPill key={item.value} selected={(config.imageDispatchMode || "sync") === item.value} theme={theme} title={item.title} onClick={() => onConfigChange("imageDispatchMode", item.value)}>
                                         {item.label}
                                     </OptionPill>
                                 ))}

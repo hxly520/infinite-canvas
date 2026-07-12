@@ -307,7 +307,7 @@ function readImageTaskError(payload: ImageTaskResponse) {
 }
 
 function normalizeImageDispatchMode(value: string | undefined) {
-    return value === "sync" || value === "async" || value === "auto" ? value : "auto";
+    return value === "async" ? "async" : "sync";
 }
 
 function normalizeImageResponseFormat(value: string | undefined) {
@@ -829,22 +829,6 @@ async function pollOpenAIImageTask(config: AiConfig, endpoint: OpenAIImageTaskEn
     }
 }
 
-function readTaskIdFromAxiosError(error: unknown) {
-    if (!axios.isAxiosError<ImageTaskResponse>(error)) return "";
-    const data = error.response?.data;
-    return data ? resolveImageTaskId(data) : "";
-}
-
-function shouldTryAsyncAfterSyncError(error: unknown) {
-    if (!axios.isAxiosError(error) || !error.response) return false;
-    const status = error.response.status;
-    if (![400, 405, 409, 422].includes(status)) return false;
-    const message = readAxiosError(error, "请求失败").toLowerCase();
-    const mentionsAsync = /async|asynchronous|异步|任务|task|queued|poll/.test(message);
-    const asksForAsync = /需要|必须|请使用|use|required|only|not support|unsupported|不支持/.test(message);
-    return mentionsAsync && asksForAsync;
-}
-
 export async function requestGeneration(config: AiConfig, prompt: string, options?: RequestOptions) {
     const requestConfig = resolveModelRequestConfig(config, config.model || config.imageModel);
     const n = fireflyImageTier(requestConfig.model) ? 1 : Math.max(1, Math.min(15, Math.floor(Math.abs(Number(config.count)) || 1)));
@@ -858,15 +842,7 @@ export async function requestGeneration(config: AiConfig, prompt: string, option
     const dispatchMode = normalizeImageDispatchMode(requestConfig.imageDispatchMode);
     try {
         if (dispatchMode === "async") return await requestOpenAIImageGenerationAsync(requestConfig, prompt, n, options);
-        if (dispatchMode === "sync") return await requestOpenAIImageGenerationSync(requestConfig, prompt, n, options);
-        try {
-            return await requestOpenAIImageGenerationSync(requestConfig, prompt, n, options);
-        } catch (syncError) {
-            const taskId = readTaskIdFromAxiosError(syncError);
-            if (taskId) return await pollOpenAIImageTask(requestConfig, "generations", taskId, options);
-            if (shouldTryAsyncAfterSyncError(syncError)) return await requestOpenAIImageGenerationAsync(requestConfig, prompt, n, options);
-            throw syncError;
-        }
+        return await requestOpenAIImageGenerationSync(requestConfig, prompt, n, options);
     } catch (error) {
         throw new Error(readAxiosError(error, "请求失败"));
     }
@@ -926,15 +902,7 @@ export async function requestEdit(config: AiConfig, prompt: string, references: 
     try {
         const dispatchMode = normalizeImageDispatchMode(requestConfig.imageDispatchMode);
         if (dispatchMode === "async") return await submitEdit(true);
-        if (dispatchMode === "sync") return await submitEdit(false);
-        try {
-            return await submitEdit(false);
-        } catch (syncError) {
-            const taskId = readTaskIdFromAxiosError(syncError);
-            if (taskId) return await pollOpenAIImageTask(requestConfig, "edits", taskId, options);
-            if (shouldTryAsyncAfterSyncError(syncError)) return await submitEdit(true);
-            throw syncError;
-        }
+        return await submitEdit(false);
     } catch (error) {
         throw new Error(readAxiosError(error, "请求失败"));
     }

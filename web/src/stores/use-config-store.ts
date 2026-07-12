@@ -4,7 +4,7 @@ import { persist } from "zustand/middleware";
 import { nanoid } from "nanoid";
 
 export type ApiCallFormat = "openai" | "gemini";
-export type ImageDispatchMode = "auto" | "sync" | "async";
+export type ImageDispatchMode = "sync" | "async";
 export type ImageResponseFormat = "b64_json" | "url";
 
 export type ModelChannel = {
@@ -117,7 +117,7 @@ export const defaultConfig: AiConfig = {
     size: "1:1",
     count: "1",
     canvasImageCount: "3",
-    imageDispatchMode: "auto",
+    imageDispatchMode: "sync",
     imageResponseFormat: "b64_json",
     imagePollIntervalMs: "2500",
     imagePollTimeoutMs: "600000",
@@ -393,7 +393,7 @@ function normalizeApiFormat(apiFormat: unknown): ApiCallFormat {
 }
 
 function normalizeImageDispatchMode(value: unknown): ImageDispatchMode {
-    return value === "sync" || value === "async" || value === "auto" ? value : defaultConfig.imageDispatchMode;
+    return value === "async" ? "async" : "sync";
 }
 
 function normalizeImageResponseFormat(value: unknown): ImageResponseFormat {

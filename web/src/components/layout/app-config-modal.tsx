@@ -92,7 +92,17 @@ export function AppConfigModal() {
     };
 
     const updateChannel = (id: string, patch: Partial<ModelChannel>) => {
-        updateChannels(config.channels.map((channel) => (channel.id === id ? { ...channel, ...patch, models: patch.models ? uniqueModels(patch.models) : channel.models } : channel)));
+        updateChannels(
+            config.channels.map((channel) => {
+                if (channel.id !== id) return channel;
+                const connectionChanged =
+                    (patch.baseUrl !== undefined && patch.baseUrl !== channel.baseUrl) ||
+                    (patch.apiKey !== undefined && patch.apiKey !== channel.apiKey) ||
+                    (patch.apiFormat !== undefined && patch.apiFormat !== channel.apiFormat);
+                const models = patch.models !== undefined ? uniqueModels(patch.models) : connectionChanged ? [] : channel.models;
+                return { ...channel, ...patch, models };
+            }),
+        );
     };
 
     const updateChannelApiFormat = (channel: ModelChannel, apiFormat: ApiCallFormat) => {
@@ -433,6 +443,7 @@ function withChannels(config: AiConfig, channels: ModelChannel[]): AiConfig {
         baseUrl: channels[0]?.baseUrl || config.baseUrl,
         apiKey: channels[0]?.apiKey || config.apiKey,
         apiFormat: channels[0]?.apiFormat || config.apiFormat,
+        model: normalizeDefaultModel(config.model, models),
         imageModels,
         videoModels,
         textModels,
@@ -452,7 +463,7 @@ function keepOrSuggest(current: string[], suggested: string[], allModels: string
 
 function normalizeDefaultModel(value: string, options: string[]) {
     if (options.includes(value)) return value;
-    return options[0] || value;
+    return options[0] || "";
 }
 
 function normalizeImageCount(value: string) {

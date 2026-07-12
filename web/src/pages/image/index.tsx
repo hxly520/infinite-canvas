@@ -255,7 +255,7 @@ export default function ImagePage() {
         if (log.config.quality) updateConfig("quality", log.config.quality);
         if (log.config.size) updateConfig("size", log.config.size);
         if (log.config.count) updateConfig("count", log.config.count);
-        if (log.config.imageDispatchMode) updateConfig("imageDispatchMode", log.config.imageDispatchMode);
+        updateConfig("imageDispatchMode", normalizeStoredImageDispatchMode(log.config.imageDispatchMode));
         if (log.config.imageConcurrency) updateConfig("imageConcurrency", log.config.imageConcurrency);
         setResults(log.images.map((image) => ({ id: image.id, status: "success", image })));
     };
@@ -766,9 +766,13 @@ function normalizeLogConfig(log: Partial<GenerationLog>): GenerationLogConfig {
         quality: log.config?.quality || log.quality || "",
         size: log.config?.size || log.size || "",
         count: log.config?.count || String(log.imageCount || log.successCount || 1),
-        imageDispatchMode: log.config?.imageDispatchMode || "auto",
+        imageDispatchMode: normalizeStoredImageDispatchMode(log.config?.imageDispatchMode),
         imageConcurrency: log.config?.imageConcurrency || "5",
     };
+}
+
+function normalizeStoredImageDispatchMode(value: unknown): AiConfig["imageDispatchMode"] {
+    return value === "async" ? "async" : "sync";
 }
 
 function moveListItem<T>(items: T[], index: number, offset: number) {
