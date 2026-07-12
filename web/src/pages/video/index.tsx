@@ -11,7 +11,19 @@ import { PromptSelectDialog } from "@/components/prompts/prompt-select-dialog";
 import { VideoSettingsPanel, normalizeVideoResolutionValue, normalizeVideoSizeValue, videoSizeLabel } from "@/components/video-settings-panel";
 import { canvasThemes } from "@/lib/canvas-theme";
 import { formatBytes, formatDuration } from "@/lib/image-utils";
-import { boolConfig, isArkPlanBaseUrl, isSeedanceVideoConfig, normalizeSeedanceRatio, seedanceReferenceLabel, seedanceVideoReferenceError, seedanceVideoReferenceHint, SEEDANCE_REFERENCE_LIMITS } from "@/lib/seedance-video";
+import {
+    boolConfig,
+    isArkPlanBaseUrl,
+    isSeedanceVideoConfig,
+    isSeedanceVideoModel,
+    normalizeSeedanceRatio,
+    normalizeVideoReferenceMode,
+    seedanceReferenceLabel,
+    seedanceVideoReferenceError,
+    seedanceVideoReferenceHint,
+    SEEDANCE_REFERENCE_LIMITS,
+    supportsVideoFrameMode,
+} from "@/lib/seedance-video";
 import { resolveMediaUrl, uploadMediaFile } from "@/services/file-storage";
 import { resolveImageUrl, uploadImage } from "@/services/image-storage";
 import { createVideoGenerationIdempotencyKey, createVideoGenerationTask, storeGeneratedVideo, videoReferenceLimits, VideoGenerationTerminalError, waitForVideoGenerationTask, type VideoGenerationTask } from "@/services/api/video";
@@ -61,7 +73,7 @@ type GenerationLog = {
     error?: string;
 };
 
-type GenerationLogConfig = Pick<AiConfig, "model" | "videoModel" | "size" | "vquality" | "videoSeconds" | "videoGenerateAudio" | "videoWatermark">;
+type GenerationLogConfig = Pick<AiConfig, "model" | "videoModel" | "size" | "vquality" | "videoSeconds" | "videoGenerateAudio" | "videoWatermark" | "videoReferenceMode">;
 type ReferenceMediaKind = "image" | "video" | "audio";
 
 type UpdateAiConfig = <K extends keyof AiConfig>(key: K, value: AiConfig[K]) => void;
@@ -102,7 +114,9 @@ export default function VideoPage() {
 
     const model = [effectiveConfig.videoModel, effectiveConfig.model].find((value) => value && modelMatchesCapability(value, "video")) || "";
     const selectedVideoConfig = resolveModelRequestConfig(effectiveConfig, model);
-    const referenceLimits = isArkPlanBaseUrl(selectedVideoConfig.baseUrl) ? { images: SEEDANCE_REFERENCE_LIMITS.images, videos: SEEDANCE_REFERENCE_LIMITS.videos, audios: SEEDANCE_REFERENCE_LIMITS.audios } : videoReferenceLimits(model);
+    const referenceMode = normalizeVideoReferenceMode(selectedVideoConfig.videoReferenceMode);
+    const firstLastFrameMode = referenceMode === "frames" && !isArkPlanBaseUrl(selectedVideoConfig.baseUrl) && supportsVideoFrameMode(model);
+    const referenceLimits = isArkPlanBaseUrl(selectedVideoConfig.baseUrl) ? { images: SEEDANCE_REFERENCE_LIMITS.images, videos: SEEDANCE_REFERENCE_LIMITS.videos, audios: SEEDANCE_REFERENCE_LIMITS.audios } : videoReferenceLimits(model, referenceMode);
     const remoteReferenceMediaOnly = !isArkPlanBaseUrl(selectedVideoConfig.baseUrl) && /(?:seedance|grok)/i.test(modelOptionName(model));
     const canGenerate = Boolean(prompt.trim());
 
@@ -281,6 +295,14 @@ export default function VideoPage() {
             return null;
         }
         const requestConfig = buildVideoConfig(effectiveConfig, model);
+        if (normalizeVideoReferenceMode(requestConfig.videoReferenceMode) === "frames" && supportsVideoFrameMode(model)) {
+            const seedanceFrames = isSeedanceVideoModel(modelOptionName(model));
+            const invalidImageCount = seedanceFrames ? references.length !== 2 : references.length < 1 || references.length > 2;
+            if (invalidImageCount || videoReferences.length || audioReferences.length) {
+                message.error(seedanceFrames ? "Seedance 首尾帧模式需要且只能使用 2 张参考图，不能同时添加参考视频或音频" : "Omni 首尾帧模式需要 1 张首帧或 2 张首尾帧参考图，不能同时添加参考视频或音频");
+                return null;
+            }
+        }
         if (isSeedanceVideoConfig(requestConfig)) {
             const validationModel = isArkPlanBaseUrl(requestConfig.baseUrl) ? "" : modelOptionName(requestConfig.model || requestConfig.videoModel);
             const videoReferenceError = seedanceVideoReferenceError(videoReferences, validationModel);
@@ -481,6 +503,7 @@ export default function VideoPage() {
         if (log.config.videoSeconds) updateConfig("videoSeconds", log.config.videoSeconds);
         if (log.config.videoGenerateAudio) updateConfig("videoGenerateAudio", log.config.videoGenerateAudio);
         if (log.config.videoWatermark) updateConfig("videoWatermark", log.config.videoWatermark);
+        if (log.config.videoReferenceMode) updateConfig("videoReferenceMode", log.config.videoReferenceMode);
         setResults(
             log.status === "生成中"
                 ? [{ id: log.id, status: "pending" }]
@@ -537,7 +560,7 @@ export default function VideoPage() {
 
                             <div className="min-w-0">
                                 <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
-                                    <span className="text-base font-semibold">参考图</span>
+                                    <span className="text-base font-semibold">{firstLastFrameMode ? "首尾帧" : "参考图"}</span>
                                     <div className="flex flex-wrap justify-end gap-2">
                                         <Button size="small" icon={<ClipboardPaste className="size-3.5" />} disabled={!referenceLimits.images} onClick={() => void addReferencesFromClipboard()}>
                                             剪切板
@@ -551,7 +574,7 @@ export default function VideoPage() {
                                     {references.map((item, index) => (
                                         <div key={item.id} className="group relative size-20 shrink-0 overflow-hidden rounded-md border border-stone-200 dark:border-stone-800">
                                             <img src={item.dataUrl} alt={item.name} className="size-full object-cover" />
-                                            <span className="absolute left-1 top-1 rounded bg-black/60 px-1.5 py-0.5 text-[10px] font-medium text-white">{seedanceReferenceLabel("image", index)}</span>
+                                            <span className="absolute left-1 top-1 rounded bg-black/60 px-1.5 py-0.5 text-[10px] font-medium text-white">{firstLastFrameMode ? (index === 0 ? "首帧" : "尾帧") : seedanceReferenceLabel("image", index)}</span>
                                             <ReferenceOrderButtons index={index} total={references.length} onMove={(offset) => setReferences((value) => moveListItem(value, index, offset))} />
                                             <button
                                                 type="button"
@@ -1033,6 +1056,7 @@ function normalizeLogConfig(log: Partial<GenerationLog>): GenerationLogConfig {
         videoSeconds: log.config?.videoSeconds || log.seconds || "",
         videoGenerateAudio: log.config?.videoGenerateAudio || "true",
         videoWatermark: log.config?.videoWatermark || "false",
+        videoReferenceMode: normalizeVideoReferenceMode(log.config?.videoReferenceMode),
     };
 }
 
@@ -1071,6 +1095,7 @@ function buildLog({
         videoSeconds: config.videoSeconds,
         videoGenerateAudio: config.videoGenerateAudio,
         videoWatermark: config.videoWatermark,
+        videoReferenceMode: normalizeVideoReferenceMode(config.videoReferenceMode),
     };
     return {
         id: nanoid(),
@@ -1106,6 +1131,7 @@ function buildVideoConfig(config: AiConfig, model: string): AiConfig {
         vquality: normalizeResolution(config.vquality),
         videoGenerateAudio: String(boolConfig(config.videoGenerateAudio, true)),
         videoWatermark: String(boolConfig(config.videoWatermark, false)),
+        videoReferenceMode: normalizeVideoReferenceMode(config.videoReferenceMode),
     };
 }
 

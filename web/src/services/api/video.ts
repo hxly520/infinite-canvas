@@ -12,6 +12,7 @@ import {
     normalizeSeedanceDuration,
     normalizeSeedanceRatio,
     normalizeSeedanceResolution,
+    normalizeVideoReferenceMode,
     seedanceFixedResolution,
     seedanceVideoReferenceError,
     SEEDANCE_REFERENCE_LIMITS,
@@ -78,16 +79,17 @@ export class VideoGenerationPollingPausedError extends Error {
     }
 }
 
-export function videoReferenceLimits(model: string): VideoReferenceLimits {
+export function videoReferenceLimits(model: string, referenceMode = "auto"): VideoReferenceLimits {
     const value = modelOptionName(model).toLowerCase();
+    if (normalizeVideoReferenceMode(referenceMode) === "frames" && (isSeedanceVideoModel(value) || value.includes("omni-fast"))) return { images: 2, videos: 0, audios: 0 };
     if (value.includes("grok") && value.includes("1.5")) return { images: 1, videos: 0, audios: 0 };
     if (value.includes("grok")) return { images: 7, videos: 1, audios: 0 };
     if (isSeedancePerSecondModel(value)) return { images: 9, videos: 3, audios: 3 };
     if (isSeedanceVideoModel(value)) return { images: 4, videos: 3, audios: 1 };
     if (value.includes("omni-v2v")) return { images: 0, videos: 1, audios: 0 };
     if (value.includes("omni")) return { images: 5, videos: 0, audios: 0 };
-    if (value.includes("sora")) return { images: 0, videos: 0, audios: 0 };
-    if (value.includes("veo")) return { images: 3, videos: 0, audios: 0 };
+    if (value.includes("sora")) return { images: 1, videos: 0, audios: 0 };
+    if (value.includes("veo")) return { images: isVeoReferenceModel(value) ? 3 : 2, videos: 0, audios: 0 };
     return { images: 7, videos: 3, audios: 3 };
 }
 
@@ -192,16 +194,7 @@ function openAIVideoAdapter(model: string): OpenAIVideoAdapter {
     const value = model.toLowerCase();
     if (isSeedanceVideoModel(value)) return openAIVideosAdapter("seedance-flat", "Seedance 视频");
     if (value.includes("grok") && (value.includes("video") || value.includes("vedio"))) {
-        return {
-            kind: "video-generations-json",
-            payloadBuilder: "grok",
-            label: "Grok 视频",
-            createPath: "/video/generations",
-            statusPathBase: "/video/generations",
-            contentPathBase: "/videos",
-            pollDelayMs: OPENAI_VIDEO_POLL_DELAY_MS,
-            maxAttempts: OPENAI_VIDEO_MAX_ATTEMPTS,
-        };
+        return openAIVideosAdapter("grok", "Grok 视频");
     }
     if (value.includes("omni-v2v")) return openAIVideosAdapter("omni-v2v", "Omni 视频转视频");
     if (value.includes("omni")) return openAIVideosAdapter("omni-frame", "Omni 视频");
@@ -237,7 +230,7 @@ function openAIVideosAdapter(payloadBuilder: OpenAIVideoAdapter["payloadBuilder"
 
 async function createOpenAIVideoTask(config: AiConfig, model: string, prompt: string, references: ReferenceImage[], videoReferences: ReferenceVideo[], audioReferences: ReferenceAudio[], options?: RequestOptions): Promise<VideoGenerationTask> {
     const adapter = openAIVideoAdapter(modelOptionName(model));
-    if (adapter.payloadBuilder === "omni-frame" && references.length > 1) {
+    if (adapter.payloadBuilder === "omni-frame" && references.length > 1 && normalizeVideoReferenceMode(config.videoReferenceMode) !== "frames") {
         return createOpenAIVideoMultipartTask(config, model, prompt, references, videoReferences, audioReferences, adapter, options);
     }
     if (adapter.payloadBuilder === "omni-v2v" && videoReferences.length === 1 && !isPublicMediaUrl(videoReferences[0].url)) {
@@ -319,6 +312,7 @@ async function buildOpenAIVideoPayload(config: AiConfig, model: string, prompt: 
     const aspectRatio = normalizeOpenAIVideoAspectRatio(config.size);
     const resolution = normalizeOpenAIVideoResolution(config.vquality, requestModel);
     const seconds = Number(normalizeVideoSeconds(config.videoSeconds));
+    const referenceMode = normalizeVideoReferenceMode(config.videoReferenceMode);
     const payload: Record<string, unknown> = {
         model: requestModel,
         prompt: prompt.trim(),
@@ -328,24 +322,33 @@ async function buildOpenAIVideoPayload(config: AiConfig, model: string, prompt: 
 
     switch (adapter.payloadBuilder) {
         case "seedance-flat": {
-            if (audioUrls.length && !imageUrls.length && !videoUrls.length) throw new Error("Seedance 参考音频不能单独使用，请同时添加参考图或参考视频");
+            if (referenceMode === "frames") {
+                if (imageUrls.length !== 2 || videoUrls.length || audioUrls.length) throw new Error("Seedance 首尾帧模式需要且只能使用 2 张参考图，不能同时添加参考视频或音频");
+            } else if (audioUrls.length && !imageUrls.length && !videoUrls.length) {
+                throw new Error("Seedance 参考音频不能单独使用，请同时添加参考图或参考视频");
+            }
             assertSeedanceVideoReferences(videoReferences, requestModel);
             assertSeedanceAudioReferences(audioReferences);
             const perSecond = isSeedancePerSecondModel(requestModel);
             assertReferenceLimit(imageUrls, perSecond ? 9 : 4, "参考图");
             assertReferenceLimit(videoUrls, 3, "参考视频");
             assertReferenceLimit(audioUrls, perSecond ? 3 : 1, "参考音频");
-            if ((videoUrls.length || audioUrls.length) && !imageUrls.length) throw new Error("Seedance 参考视频或音频需要至少同时添加 1 张参考图");
-            payload.prompt = buildSeedancePromptText(prompt, references, videoReferences, audioReferences);
+            if (referenceMode !== "frames" && (videoUrls.length || audioUrls.length) && !imageUrls.length) throw new Error("Seedance 参考视频或音频需要至少同时添加 1 张参考图");
+            payload.prompt = referenceMode === "frames" ? prompt.trim() : buildSeedancePromptText(prompt, references, videoReferences, audioReferences);
             const duration = normalizeSeedanceDuration(config.videoSeconds);
             payload.duration = duration > 0 ? duration : 5;
             if (!perSecond) {
                 payload.resolution = normalizeSeedanceModelResolution(config.vquality, requestModel);
                 payload.audio = boolConfig(config.videoGenerateAudio, true);
             }
-            applySeedanceImageReferences(payload, imageUrls);
-            if (videoUrls.length) payload.reference_videos = videoUrls;
-            if (audioUrls.length) payload.reference_audios = audioUrls;
+            if (referenceMode === "frames") {
+                payload.first_image_url = imageUrls[0];
+                payload.last_image_url = imageUrls[1];
+            } else {
+                applySeedanceImageReferences(payload, imageUrls);
+                if (videoUrls.length) payload.reference_videos = videoUrls;
+                if (audioUrls.length) payload.reference_audios = audioUrls;
+            }
             return payload;
         }
         case "grok": {
@@ -375,6 +378,13 @@ async function buildOpenAIVideoPayload(config: AiConfig, model: string, prompt: 
         }
         case "omni-frame": {
             if (videoUrls.length || audioUrls.length) throw new Error("Omni 图生视频暂不支持参考视频或参考音频");
+            if (referenceMode === "frames") {
+                if (!imageUrls.length || imageUrls.length > 2) throw new Error("Omni 首尾帧模式需要 1 张首帧或 2 张首尾帧参考图");
+                payload.aspect_ratio = normalizeTwoWayAspectRatio(aspectRatio);
+                payload.first_image_url = imageUrls[0];
+                if (imageUrls[1]) payload.last_image_url = imageUrls[1];
+                return payload;
+            }
             assertReferenceLimit(imageUrls, 5, "参考图");
             payload.aspect_ratio = normalizeTwoWayAspectRatio(aspectRatio);
             applyImageReferences(payload, imageUrls);
@@ -382,21 +392,29 @@ async function buildOpenAIVideoPayload(config: AiConfig, model: string, prompt: 
         }
         case "sora2": {
             if (videoUrls.length || audioUrls.length) throw new Error("Sora 视频接口暂不支持参考视频或参考音频");
-            if (imageUrls.length) throw new Error("当前 Sora 中转模型不支持参考图片，请使用文生视频");
+            assertReferenceLimit(imageUrls, 1, "参考图");
             const duration = normalizeSoraDuration(config.videoSeconds);
             payload.duration = duration;
             payload.aspect_ratio = normalizeTwoWayAspectRatio(aspectRatio);
             payload.generate_audio = boolConfig(config.videoGenerateAudio, true);
+            if (imageUrls.length) {
+                payload.reference_mode = "frame";
+                payload.images = imageUrls;
+            }
             return payload;
         }
         case "veo": {
             if (videoUrls.length || audioUrls.length) throw new Error("Veo 视频接口不支持参考视频或参考音频");
-            assertReferenceLimit(imageUrls, 3, "参考图");
+            const veoReferenceMode = isVeoReferenceModel(requestModel) ? "image" : "frame";
+            assertReferenceLimit(imageUrls, veoReferenceMode === "image" ? 3 : 2, "参考图");
             payload.duration = normalizeAllowedDuration(seconds, [4, 6, 8], 6);
             payload.resolution = resolution === "1080p" ? "1080p" : "720p";
             payload.aspect_ratio = normalizeTwoWayAspectRatio(aspectRatio);
             payload.generate_audio = boolConfig(config.videoGenerateAudio, true);
-            if (imageUrls.length) payload.reference_image_urls = imageUrls;
+            if (imageUrls.length) {
+                payload.reference_mode = veoReferenceMode;
+                payload.images = imageUrls;
+            }
             return payload;
         }
         default: {
@@ -595,6 +613,10 @@ function normalizeAllowedDuration(value: number, allowed: number[], fallback: nu
 
 function normalizeTwoWayAspectRatio(value: string) {
     return value === "9:16" ? "9:16" : "16:9";
+}
+
+function isVeoReferenceModel(model: string) {
+    return /(?:^|[-_.:/])ref(?:$|[-_.:/])/i.test(model);
 }
 
 function normalizeTaskStatus(value: string | undefined) {

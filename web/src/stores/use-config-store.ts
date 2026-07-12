@@ -35,6 +35,7 @@ export type AiConfig = {
     vquality: string;
     videoGenerateAudio: string;
     videoWatermark: string;
+    videoReferenceMode: string;
     systemPrompt: string;
     models: string[];
     imageModels: string[];
@@ -107,6 +108,7 @@ export const defaultConfig: AiConfig = {
     vquality: "720",
     videoGenerateAudio: "true",
     videoWatermark: "false",
+    videoReferenceMode: "auto",
     systemPrompt: "",
     models: [`${IMAGE2_CHANNEL_ID}::${IMAGE2_MODEL}`, ...GEMINI_IMAGE_MODELS.map((model) => `${GEMINI_IMAGE_CHANNEL_ID}::${model}`)],
     imageModels: [`${IMAGE2_CHANNEL_ID}::${IMAGE2_MODEL}`, ...GEMINI_IMAGE_MODELS.map((model) => `${GEMINI_IMAGE_CHANNEL_ID}::${model}`)],
@@ -248,6 +250,7 @@ export const useConfigStore = create<ConfigStore>()(
                         vquality: config.vquality || "720",
                         videoGenerateAudio: config.videoGenerateAudio || "true",
                         videoWatermark: config.videoWatermark || "false",
+                        videoReferenceMode: config.videoReferenceMode === "frames" ? "frames" : "auto",
                         canvasImageCount: config.canvasImageCount || "3",
                         imageDispatchMode: normalizeImageDispatchMode(config.imageDispatchMode),
                         imageResponseFormat: normalizeImageResponseFormat(config.imageResponseFormat),
