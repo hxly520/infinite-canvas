@@ -244,9 +244,9 @@ function resolveManagedImageUrl(value: string, config: AiConfig) {
     if (!raw || raw.startsWith("//")) throw new Error("图片接口返回了无效媒体地址");
     try {
         const gateway = new URL(config.baseUrl.trim());
-        const target = raw.startsWith("/") ? new URL(raw, gateway.origin) : new URL(raw);
+        const target = raw.startsWith("/") ? new URL(raw, raw.startsWith(EDGE_IMAGE_PATH_PREFIX) ? MANAGED_IMAGE_ORIGIN : gateway.origin) : new URL(raw);
         if (!target.pathname.startsWith(EDGE_IMAGE_PATH_PREFIX)) throw new Error("external image URL");
-        if (target.origin === gateway.origin || target.origin === MANAGED_IMAGE_ORIGIN) return target.toString();
+        if (target.origin === MANAGED_IMAGE_ORIGIN) return target.toString();
     } catch {
         // Convert all URL parsing and policy failures into one user-safe error.
     }
