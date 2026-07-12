@@ -214,7 +214,20 @@ function resolveFireflyAspectRatio(size: string) {
 
 function resolveImageDataUrl(item: Record<string, unknown>) {
     if (typeof item.b64_json === "string" && item.b64_json) {
-        return `data:image/png;base64,${item.b64_json}`;
+        const explicitMime = typeof item.mime_type === "string" ? item.mime_type : typeof item.content_type === "string" ? item.content_type : "";
+        const outputFormat = typeof item.output_format === "string" ? item.output_format.toLowerCase() : "";
+        const mimeType = explicitMime.startsWith("image/")
+            ? explicitMime
+            : outputFormat === "jpeg" || outputFormat === "jpg"
+              ? "image/jpeg"
+              : outputFormat === "webp"
+                ? "image/webp"
+                : outputFormat === "gif"
+                  ? "image/gif"
+                  : outputFormat === "avif"
+                    ? "image/avif"
+                    : "image/png";
+        return `data:${mimeType};base64,${item.b64_json}`;
     }
     if (typeof item.url === "string" && item.url) {
         return item.url;
@@ -222,7 +235,25 @@ function resolveImageDataUrl(item: Record<string, unknown>) {
     return null;
 }
 
-function parseImagePayload(payload: ImageApiResponse) {
+const MANAGED_IMAGE_ORIGIN = "https://video.52token.org";
+const EDGE_IMAGE_PATH_PREFIX = "/v1/image-content/";
+
+function resolveManagedImageUrl(value: string, config: AiConfig) {
+    const raw = value.trim();
+    if (raw.startsWith("data:image/")) return raw;
+    if (!raw || raw.startsWith("//")) throw new Error("图片接口返回了无效媒体地址");
+    try {
+        const gateway = new URL(config.baseUrl.trim());
+        const target = raw.startsWith("/") ? new URL(raw, gateway.origin) : new URL(raw);
+        if (!target.pathname.startsWith(EDGE_IMAGE_PATH_PREFIX)) throw new Error("external image URL");
+        if (target.origin === gateway.origin || target.origin === MANAGED_IMAGE_ORIGIN) return target.toString();
+    } catch {
+        // Convert all URL parsing and policy failures into one user-safe error.
+    }
+    throw new Error("图片接口返回了外部媒体地址，请通过支持媒体代理的中转站端点调用");
+}
+
+function parseImagePayload(payload: ImageApiResponse, config: AiConfig) {
     if (typeof payload.code === "number" && payload.code !== 0) {
         throw new Error(payload.msg || "请求失败");
     }
@@ -233,7 +264,7 @@ function parseImagePayload(payload: ImageApiResponse) {
         payload.data
             ?.map(resolveImageDataUrl)
             .filter((value): value is string => Boolean(value))
-            .map((dataUrl) => ({ id: nanoid(), dataUrl })) || [];
+            .map((dataUrl) => ({ id: nanoid(), dataUrl: resolveManagedImageUrl(dataUrl, config) })) || [];
 
     if (images.length === 0) {
         throw new Error("接口没有返回图片");
@@ -711,6 +742,8 @@ function buildOpenAIImageGenerationBody(config: AiConfig, prompt: string, n: num
             n,
             image_size: fixedTier,
             stream: false,
+            response_format: "url",
+            output_format: IMAGE_OUTPUT_FORMAT,
             ...(aspectRatio ? { aspect_ratio: aspectRatio } : {}),
             ...(asyncMode ? { async: true } : {}),
         };
@@ -732,10 +765,10 @@ function buildOpenAIImageGenerationBody(config: AiConfig, prompt: string, n: num
 
 async function parseOpenAIImageCreatePayload(config: AiConfig, payload: ImageTaskResponse, endpoint: OpenAIImageTaskEndpoint, options?: RequestOptions) {
     const imagePayload = resolveImageTaskPayload(payload);
-    if (imagePayloadHasImages(imagePayload)) return parseImagePayload(imagePayload);
+    if (imagePayloadHasImages(imagePayload)) return parseImagePayload(imagePayload, config);
     const taskId = resolveImageTaskId(payload);
     if (taskId) return pollOpenAIImageTask(config, endpoint, taskId, options);
-    return parseImagePayload(imagePayload);
+    return parseImagePayload(imagePayload, config);
 }
 
 async function requestOpenAIImageGenerationSync(config: AiConfig, prompt: string, n: number, options?: RequestOptions) {
@@ -788,7 +821,7 @@ async function pollOpenAIImageTask(config: AiConfig, endpoint: OpenAIImageTaskEn
 
         if (payload) {
             const imagePayload = resolveImageTaskPayload(payload);
-            if (isImageTaskCompleted(payload) || imagePayloadHasImages(imagePayload)) return parseImagePayload(imagePayload);
+            if (isImageTaskCompleted(payload) || imagePayloadHasImages(imagePayload)) return parseImagePayload(imagePayload, config);
             if (isImageTaskFailed(payload)) throw new Error(readImageTaskError(payload));
         }
 
@@ -826,7 +859,6 @@ export async function requestGeneration(config: AiConfig, prompt: string, option
     try {
         if (dispatchMode === "async") return await requestOpenAIImageGenerationAsync(requestConfig, prompt, n, options);
         if (dispatchMode === "sync") return await requestOpenAIImageGenerationSync(requestConfig, prompt, n, options);
-        if (fireflyImageTier(requestConfig.model)) return await requestOpenAIImageGenerationAsync(requestConfig, prompt, n, options);
         try {
             return await requestOpenAIImageGenerationSync(requestConfig, prompt, n, options);
         } catch (syncError) {
@@ -866,6 +898,8 @@ export async function requestEdit(config: AiConfig, prompt: string, references: 
         if (fixedTier) {
             formData.set("image_size", fixedTier);
             formData.set("stream", "false");
+            formData.set("response_format", "url");
+            formData.set("output_format", IMAGE_OUTPUT_FORMAT);
             const aspectRatio = resolveFireflyAspectRatio(config.size);
             if (aspectRatio) formData.set("aspect_ratio", aspectRatio);
         } else {
@@ -893,7 +927,6 @@ export async function requestEdit(config: AiConfig, prompt: string, references: 
         const dispatchMode = normalizeImageDispatchMode(requestConfig.imageDispatchMode);
         if (dispatchMode === "async") return await submitEdit(true);
         if (dispatchMode === "sync") return await submitEdit(false);
-        if (fixedTier) return await submitEdit(true);
         try {
             return await submitEdit(false);
         } catch (syncError) {

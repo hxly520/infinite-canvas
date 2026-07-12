@@ -58,7 +58,7 @@ export type VideoReferenceLimits = { images: number; videos: number; audios: num
 
 const OPENAI_VIDEO_POLL_DELAY_MS = 5000;
 const OPENAI_VIDEO_MAX_ATTEMPTS = 360;
-const MANAGED_VIDEO_ORIGIN = "https://image.52token.org";
+const MANAGED_VIDEO_ORIGIN = "https://video.52token.org";
 const EDGE_VIDEO_PATH_PREFIX = "/v1/video-content/";
 
 export class VideoGenerationTerminalError extends Error {
