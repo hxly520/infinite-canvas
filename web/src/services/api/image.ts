@@ -4,6 +4,7 @@ import { buildApiUrl, resolveModelRequestConfig, type AiConfig, type ModelChanne
 import { nanoid } from "nanoid";
 import { dataUrlToFile } from "@/lib/image-utils";
 import { buildImageReferencePromptText } from "@/lib/image-reference-prompt";
+import { fixedImageTier } from "@/lib/image-model";
 import { imageToDataUrl } from "@/services/image-storage";
 import type { ReferenceImage } from "@/types/image";
 
@@ -59,7 +60,12 @@ type ResponseApiPayload = {
 type ResponseStreamState = { buffer: string; text: string; payload?: ResponseApiPayload; error?: string };
 
 type ImageApiResponse = {
-    data?: Array<Record<string, unknown>>;
+    data?: unknown[];
+    images?: unknown[];
+    output?: unknown[];
+    results?: unknown[];
+    result?: unknown;
+    response?: unknown;
     error?: { message?: string };
     code?: number;
     msg?: string;
@@ -188,34 +194,30 @@ function resolveRequestSize(quality: string | undefined, size: string) {
     throw new Error("图像尺寸格式不支持，请使用 auto、9:16 或 1024x1024");
 }
 
-function fireflyImageTier(model: string) {
-    return model
-        .trim()
-        .toLowerCase()
-        .match(/^firefly-[a-z0-9._-]+-(1k|2k|4k)$/)?.[1]
-        ?.toUpperCase();
-}
-
-function resolveFireflyAspectRatio(size: string) {
+function resolveFixedImageAspectRatio(size: string) {
     const value = size.trim().toLowerCase();
     if (!value || value === "auto") return undefined;
     if ((FIREFLY_IMAGE_RATIOS as readonly string[]).includes(value)) return value;
 
     const dimensions = parseImageDimensions(value);
-    if (!dimensions) throw new Error("当前 Firefly 模型仅支持 1:1、4:3、3:4、16:9 或 9:16 画幅");
+    if (!dimensions) throw new Error("当前固定档位模型仅支持 1:1、4:3、3:4、16:9 或 9:16 画幅");
     const ratio = dimensions.width / dimensions.height;
     const matched = FIREFLY_IMAGE_RATIOS.find((candidate) => {
         const [width, height] = candidate.split(":").map(Number);
         return Math.abs(ratio - width / height) < 0.02;
     });
-    if (!matched) throw new Error("当前 Firefly 模型仅支持 1:1、4:3、3:4、16:9 或 9:16 画幅");
+    if (!matched) throw new Error("当前固定档位模型仅支持 1:1、4:3、3:4、16:9 或 9:16 画幅");
     return matched;
 }
 
-function resolveImageDataUrl(item: Record<string, unknown>) {
-    if (typeof item.b64_json === "string" && item.b64_json) {
-        const explicitMime = typeof item.mime_type === "string" ? item.mime_type : typeof item.content_type === "string" ? item.content_type : "";
-        const outputFormat = typeof item.output_format === "string" ? item.output_format.toLowerCase() : "";
+function resolveImageDataUrl(item: unknown) {
+    if (typeof item === "string") return normalizeImageResultString(item);
+    if (!item || typeof item !== "object" || Array.isArray(item)) return null;
+    const record = item as Record<string, unknown>;
+    const base64 = firstString(record, ["b64_json", "base64", "image_base64"]);
+    if (base64) {
+        const explicitMime = typeof record.mime_type === "string" ? record.mime_type : typeof record.content_type === "string" ? record.content_type : "";
+        const outputFormat = typeof record.output_format === "string" ? record.output_format.toLowerCase() : "";
         const mimeType = explicitMime.startsWith("image/")
             ? explicitMime
             : outputFormat === "jpeg" || outputFormat === "jpg"
@@ -227,12 +229,43 @@ function resolveImageDataUrl(item: Record<string, unknown>) {
                   : outputFormat === "avif"
                     ? "image/avif"
                     : "image/png";
-        return `data:${mimeType};base64,${item.b64_json}`;
+        return base64.startsWith("data:image/") ? base64 : `data:${mimeType};base64,${base64}`;
     }
-    if (typeof item.url === "string" && item.url) {
-        return item.url;
-    }
+    const url = firstString(record, ["url", "image_url", "download_url", "result_url", "output_url", "media_url"]);
+    if (url) return normalizeImageResultString(url);
     return null;
+}
+
+function normalizeImageResultString(value: string) {
+    const trimmed = value.trim();
+    if (!trimmed) return null;
+    if (trimmed.startsWith("data:image/") || trimmed.startsWith("/") || /^https?:\/\//i.test(trimmed)) return trimmed;
+    if (/^[A-Za-z0-9+/_=-]+$/.test(trimmed) && trimmed.length > 128) return `data:image/png;base64,${trimmed}`;
+    return null;
+}
+
+function firstString(record: Record<string, unknown>, keys: string[]) {
+    for (const key of keys) {
+        const value = record[key];
+        if (typeof value === "string" && value.trim()) return value.trim();
+    }
+    return "";
+}
+
+function imagePayloadItems(payload: ImageApiResponse, depth = 0): unknown[] {
+    if (!payload || typeof payload !== "object" || depth > 2) return [];
+    const items = [payload.data, payload.images, payload.output, payload.results].flatMap((value) => (Array.isArray(value) ? value : []));
+    for (const wrapper of [payload.result, payload.response]) {
+        if (Array.isArray(wrapper)) items.push(...wrapper);
+        else if (wrapper && typeof wrapper === "object") items.push(...imagePayloadItems(wrapper as ImageApiResponse, depth + 1));
+    }
+    return items;
+}
+
+function imagePayloadDataUrls(payload: ImageApiResponse) {
+    return imagePayloadItems(payload)
+        .map(resolveImageDataUrl)
+        .filter((value): value is string => Boolean(value));
 }
 
 const MANAGED_IMAGE_ORIGIN = "https://video.52token.org";
@@ -260,11 +293,7 @@ function parseImagePayload(payload: ImageApiResponse, config: AiConfig) {
     if (payload.error?.message) {
         throw new Error(payload.error.message);
     }
-    const images =
-        payload.data
-            ?.map(resolveImageDataUrl)
-            .filter((value): value is string => Boolean(value))
-            .map((dataUrl) => ({ id: nanoid(), dataUrl: resolveManagedImageUrl(dataUrl, config) })) || [];
+    const images = imagePayloadDataUrls(payload).map((dataUrl) => ({ id: nanoid(), dataUrl: resolveManagedImageUrl(dataUrl, config) }));
 
     if (images.length === 0) {
         throw new Error("接口没有返回图片");
@@ -274,7 +303,7 @@ function parseImagePayload(payload: ImageApiResponse, config: AiConfig) {
 }
 
 function imagePayloadHasImages(payload: ImageApiResponse) {
-    return Boolean(payload.data?.some((item) => resolveImageDataUrl(item)));
+    return imagePayloadDataUrls(payload).length > 0;
 }
 
 function resolveImageTaskId(payload: ImageTaskResponse) {
@@ -733,9 +762,9 @@ function parseGeminiImagePayload(payload: GeminiPayload) {
 }
 
 function buildOpenAIImageGenerationBody(config: AiConfig, prompt: string, n: number, asyncMode: boolean) {
-    const fixedTier = fireflyImageTier(config.model);
+    const fixedTier = fixedImageTier(config.model);
     if (fixedTier) {
-        const aspectRatio = resolveFireflyAspectRatio(config.size);
+        const aspectRatio = resolveFixedImageAspectRatio(config.size);
         return {
             model: config.model,
             prompt: withSystemPrompt(config, prompt),
@@ -831,7 +860,7 @@ async function pollOpenAIImageTask(config: AiConfig, endpoint: OpenAIImageTaskEn
 
 export async function requestGeneration(config: AiConfig, prompt: string, options?: RequestOptions) {
     const requestConfig = resolveModelRequestConfig(config, config.model || config.imageModel);
-    const n = fireflyImageTier(requestConfig.model) ? 1 : Math.max(1, Math.min(15, Math.floor(Math.abs(Number(config.count)) || 1)));
+    const n = fixedImageTier(requestConfig.model) ? 1 : Math.max(1, Math.min(15, Math.floor(Math.abs(Number(config.count)) || 1)));
     if (requestConfig.apiFormat === "gemini") {
         try {
             return await requestGeminiImages(requestConfig, prompt, [], n, options);
@@ -850,7 +879,7 @@ export async function requestGeneration(config: AiConfig, prompt: string, option
 
 export async function requestEdit(config: AiConfig, prompt: string, references: ReferenceImage[], mask?: ReferenceImage, options?: RequestOptions) {
     const requestConfig = resolveModelRequestConfig(config, config.model || config.imageModel);
-    const n = fireflyImageTier(requestConfig.model) ? 1 : Math.max(1, Math.min(15, Math.floor(Math.abs(Number(config.count)) || 1)));
+    const n = fixedImageTier(requestConfig.model) ? 1 : Math.max(1, Math.min(15, Math.floor(Math.abs(Number(config.count)) || 1)));
     const requestPrompt = buildImageReferencePromptText(prompt, references);
     if (requestConfig.apiFormat === "gemini") {
         if (mask) throw new Error("Gemini 调用格式暂不支持蒙版编辑");
@@ -860,7 +889,7 @@ export async function requestEdit(config: AiConfig, prompt: string, references: 
             throw new Error(readAxiosError(error, "请求失败"));
         }
     }
-    const fixedTier = fireflyImageTier(requestConfig.model);
+    const fixedTier = fixedImageTier(requestConfig.model);
     const quality = fixedTier ? undefined : normalizeQuality(config.quality);
     const requestSize = fixedTier ? undefined : resolveRequestSize(quality, config.size);
     const files = await Promise.all(references.map(async (image) => dataUrlToFile({ ...image, dataUrl: await imageToDataUrl(image) })));
@@ -876,7 +905,7 @@ export async function requestEdit(config: AiConfig, prompt: string, references: 
             formData.set("stream", "false");
             formData.set("response_format", "url");
             formData.set("output_format", IMAGE_OUTPUT_FORMAT);
-            const aspectRatio = resolveFireflyAspectRatio(config.size);
+            const aspectRatio = resolveFixedImageAspectRatio(config.size);
             if (aspectRatio) formData.set("aspect_ratio", aspectRatio);
         } else {
             formData.set("response_format", "b64_json");

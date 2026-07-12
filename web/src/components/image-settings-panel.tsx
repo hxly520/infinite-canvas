@@ -3,6 +3,7 @@ import { ConfigProvider, Switch } from "antd";
 
 import { type CanvasTheme } from "@/lib/canvas-theme";
 import { modelOptionName, type AiConfig } from "@/stores/use-config-store";
+import { fixedImageTier } from "@/lib/image-model";
 
 const qualityOptions = [
     { value: "auto", label: "自动" },
@@ -47,11 +48,11 @@ type ImageSettingsPanelProps = {
 
 export function ImageSettingsPanel({ config, onConfigChange, theme, showTitle = true, className = "w-[320px] space-y-4 rounded-2xl px-1 py-0.5", maxCount = 15, quickCount = 10, showAdvancedControls = false }: ImageSettingsPanelProps) {
     const [snapDimensionToStep, setSnapDimensionToStep] = useState(true);
-    const fireflyTier = fireflyImageTier(modelOptionName(config.imageModel || config.model));
-    const availableAspectOptions = fireflyTier ? aspectOptions.filter((item) => ["1:1", "4:3", "3:4", "16:9", "9:16", "auto"].includes(item.value)) : aspectOptions;
+    const fixedTier = fixedImageTier(modelOptionName(config.imageModel || config.model));
+    const availableAspectOptions = fixedTier ? aspectOptions.filter((item) => ["1:1", "4:3", "3:4", "16:9", "9:16", "auto"].includes(item.value)) : aspectOptions;
     const quality = config.quality || "auto";
-    const effectiveMaxCount = fireflyTier ? 1 : maxCount;
-    const effectiveQuickCount = fireflyTier ? 1 : quickCount;
+    const effectiveMaxCount = fixedTier ? 1 : maxCount;
+    const effectiveQuickCount = fixedTier ? 1 : quickCount;
     const count = Math.max(1, Math.min(effectiveMaxCount, Math.floor(Math.abs(Number(config.count)) || 1)));
     const concurrency = Math.max(1, Math.min(10, Math.floor(Math.abs(Number(config.imageConcurrency)) || 5)));
     const activeSize = config.size || "auto";
@@ -80,10 +81,10 @@ export function ImageSettingsPanel({ config, onConfigChange, theme, showTitle = 
                 }}
             >
                 {showTitle ? <div className="text-lg font-semibold">图像设置</div> : null}
-                {fireflyTier ? (
+                {fixedTier ? (
                     <div className="space-y-2.5">
                         <SettingTitle color={theme.node.muted}>输出档位</SettingTitle>
-                        <div className="text-sm font-medium">{fireflyTier}</div>
+                        <div className="text-sm font-medium">{fixedTier}</div>
                     </div>
                 ) : (
                     <>
@@ -174,14 +175,6 @@ export function ImageSettingsPanel({ config, onConfigChange, theme, showTitle = 
             </div>
         </ImageSettingsTheme>
     );
-}
-
-function fireflyImageTier(model: string) {
-    return model
-        .trim()
-        .toLowerCase()
-        .match(/^firefly-[a-z0-9._-]+-(1k|2k|4k)$/)?.[1]
-        ?.toUpperCase();
 }
 
 export function ImageSettingsTheme({ theme, children }: { theme: CanvasTheme; children: ReactNode }) {

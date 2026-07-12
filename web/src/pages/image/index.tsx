@@ -280,10 +280,17 @@ export default function ImagePage() {
             const result = snapshot.references.length ? await requestEdit(snapshot.config, snapshot.text, snapshot.references) : await requestGeneration(snapshot.config, snapshot.text);
             const image = result[0];
             if (!image) throw new Error("接口没有返回图片");
-            const stored = await uploadImage(image.dataUrl);
-            const nextImage = { id: image.id, dataUrl: stored.url, storageKey: stored.storageKey, durationMs: performance.now() - itemStartedAt, width: stored.width, height: stored.height, bytes: stored.bytes, mimeType: stored.mimeType };
-            setResults((value) => updateResultAt(value, index, { status: "success", image: nextImage }));
-            return nextImage;
+            const previewImage: GeneratedImage = { id: image.id, dataUrl: image.dataUrl, durationMs: performance.now() - itemStartedAt, width: 0, height: 0, bytes: 0 };
+            setResults((value) => updateResultAt(value, index, { status: "success", image: previewImage }));
+            try {
+                const stored = await uploadImage(image.dataUrl);
+                const nextImage = { ...previewImage, dataUrl: stored.url, storageKey: stored.storageKey, width: stored.width, height: stored.height, bytes: stored.bytes, mimeType: stored.mimeType };
+                setResults((value) => updateResultAt(value, index, { status: "success", image: nextImage }));
+                return nextImage;
+            } catch {
+                message.warning("图片已生成并可预览，但保存到浏览器本地失败，刷新页面后可能丢失");
+                return previewImage;
+            }
         } catch (error) {
             setResults((value) => updateResultAt(value, index, { status: "failed", error: error instanceof Error ? error.message : "生成失败" }));
             throw error;
