@@ -10,11 +10,13 @@ import {
     normalizeSeedanceDuration,
     normalizeSeedanceRatio,
     normalizeSeedanceResolution,
+    normalizeVideoReferenceMode,
     seedanceDurationOptions,
     seedanceFixedResolution,
     seedancePixelLabel,
     seedanceRatioOptions,
     seedanceResolutionOptions,
+    supportsVideoFrameMode,
 } from "@/lib/seedance-video";
 import { type CanvasTheme } from "@/lib/canvas-theme";
 import { modelOptionName, type AiConfig } from "@/stores/use-config-store";
@@ -37,7 +39,7 @@ const defaultSecondOptions = [6, 10, 12, 16, 20];
 
 type VideoSettingsPanelProps = {
     config: AiConfig;
-    onConfigChange: (key: "vquality" | "size" | "videoSeconds" | "videoGenerateAudio" | "videoWatermark", value: string) => void;
+    onConfigChange: (key: "vquality" | "size" | "videoSeconds" | "videoGenerateAudio" | "videoWatermark" | "videoReferenceMode", value: string) => void;
     theme: CanvasTheme;
     showTitle?: boolean;
     className?: string;
@@ -78,6 +80,9 @@ export function VideoSettingsPanel({ config, onConfigChange, theme, showTitle = 
     const size = normalizeVideoSizeValue(config.size);
     const dimensions = readSizeDimensions(size);
     const resolution = normalizeVideoResolutionValue(config.vquality);
+    const frameModeAvailable = supportsVideoFrameMode(model) && !isArkPlanBaseUrl(config.baseUrl);
+    const referenceMode = normalizeVideoReferenceMode(config.videoReferenceMode);
+    const supportsGenerateAudio = /(?:sora|veo)/i.test(model);
     const updateDimension = (key: "width" | "height", value: number | null) => {
         const next = Math.max(1, Math.floor(value || dimensions[key] || 720));
         onConfigChange("size", `${key === "width" ? next : dimensions.width}x${key === "height" ? next : dimensions.height}`);
@@ -87,6 +92,7 @@ export function VideoSettingsPanel({ config, onConfigChange, theme, showTitle = 
         <ImageSettingsTheme theme={theme}>
             <div className={className} style={{ color: theme.node.text }} onMouseDown={(event) => event.stopPropagation()}>
                 {showTitle ? <div className="text-lg font-semibold">视频设置</div> : null}
+                {frameModeAvailable ? <VideoReferenceModeSetting value={referenceMode} theme={theme} onChange={(value) => onConfigChange("videoReferenceMode", value)} /> : null}
                 <SettingGroup title="清晰度" color={theme.node.muted}>
                     <div className="grid grid-cols-3 gap-2.5">
                         {profile.resolutions.map((item) => (
@@ -132,6 +138,13 @@ export function VideoSettingsPanel({ config, onConfigChange, theme, showTitle = 
                         {profile.customSeconds ? <NumberInput value={seconds} min={1} max={20} theme={theme} onChange={(value) => onConfigChange("videoSeconds", value)} /> : null}
                     </div>
                 </SettingGroup>
+                {supportsGenerateAudio ? (
+                    <SettingGroup title="输出" color={theme.node.muted}>
+                        <div className="grid gap-2 rounded-xl border p-2.5" style={{ borderColor: theme.node.stroke }}>
+                            <SwitchRow label="生成声音" checked={boolConfig(config.videoGenerateAudio, true)} theme={theme} onChange={(checked) => onConfigChange("videoGenerateAudio", String(checked))} />
+                        </div>
+                    </SettingGroup>
+                ) : null}
             </div>
         </ImageSettingsTheme>
     );
@@ -152,11 +165,13 @@ function SeedanceVideoSettingsPanel({ config, onConfigChange, theme, showTitle, 
     const watermark = boolConfig(config.videoWatermark, false);
     const showGenerateAudio = supportsSmartDuration || !perSecondModel;
     const showWatermark = supportsSmartDuration;
+    const referenceMode = normalizeVideoReferenceMode(config.videoReferenceMode);
 
     return (
         <ImageSettingsTheme theme={theme}>
             <div className={className} style={{ color: theme.node.text }} onMouseDown={(event) => event.stopPropagation()}>
                 {showTitle ? <div className="text-lg font-semibold">视频设置</div> : null}
+                {!supportsSmartDuration ? <VideoReferenceModeSetting value={referenceMode} theme={theme} onChange={(value) => onConfigChange("videoReferenceMode", value)} /> : null}
                 <SettingGroup title="分辨率" color={theme.node.muted}>
                     <div className="grid grid-cols-3 gap-2.5">
                         {resolutionChoices.map((item) => (
@@ -205,6 +220,21 @@ function SeedanceVideoSettingsPanel({ config, onConfigChange, theme, showTitle, 
                 ) : null}
             </div>
         </ImageSettingsTheme>
+    );
+}
+
+function VideoReferenceModeSetting({ value, theme, onChange }: { value: "auto" | "frames"; theme: CanvasTheme; onChange: (value: "auto" | "frames") => void }) {
+    return (
+        <SettingGroup title="参考图模式" color={theme.node.muted}>
+            <div className="grid grid-cols-2 gap-2.5">
+                <OptionPill selected={value === "auto"} theme={theme} onClick={() => onChange("auto")}>
+                    普通参考
+                </OptionPill>
+                <OptionPill selected={value === "frames"} theme={theme} onClick={() => onChange("frames")}>
+                    首尾帧
+                </OptionPill>
+            </div>
+        </SettingGroup>
     );
 }
 

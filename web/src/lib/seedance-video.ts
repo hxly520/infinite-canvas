@@ -28,6 +28,7 @@ export const seedanceRatioOptions = [
 ] as const;
 
 export const seedanceDurationOptions = [-1, 4, 5, 6, 8, 10, 12, 15] as const;
+export type VideoReferenceMode = "auto" | "frames";
 
 const seedancePixels = {
     "480p": {
@@ -64,6 +65,15 @@ export function isSeedanceVideoConfig(config: AiConfig | Pick<AiConfig, "model" 
 export function isSeedanceVideoModel(model: string) {
     const value = model.toLowerCase();
     return value.includes("seedance") || value.includes("doubao-seedance");
+}
+
+export function normalizeVideoReferenceMode(value: string | undefined): VideoReferenceMode {
+    return value === "frames" ? "frames" : "auto";
+}
+
+export function supportsVideoFrameMode(model: string) {
+    const value = modelOptionName(model).toLowerCase();
+    return isSeedanceVideoModel(value) || value.includes("omni-fast");
 }
 
 export function isSeedanceFastModel(model: string) {
