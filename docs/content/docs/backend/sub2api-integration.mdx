@@ -1,0 +1,196 @@
+---
+title: Sub2API 适配与二开维护
+description: 52Token 工作台的图片、视频、画布和媒体任务适配边界
+---
+
+# Sub2API 适配与二开维护
+
+本文档记录 52Token 私有分支在原版无限画布上增加的 Sub2API 接口适配。目标是让后续维护者能够升级原项目而不破坏图片、视频、画布拉线、本地素材和任务恢复能力。
+
+## 1. 二开边界
+
+原版画布能力继续作为基线：
+
+- 画布、节点、连线、撤销重做、导入导出和素材管理。
+- 文本、图片、视频、音频和生成配置节点之间的连接关系。
+- 提示词库、WebDAV、本地 Agent 和 Codex 插件。
+- 用户自定义 Base URL、API Key 和模型配置。
+
+私有分支只在接口适配和媒体交付层增加能力：
+
+- OpenAI Images 同步/手动异步、图片编辑和 Gemini native 生图。
+- OpenAI 风格统一视频任务创建、查询和内容下载。
+- Seedance、Grok、Omni、Sora、Veo 请求字段和参考素材限制适配。
+- 画布拉线传递多张图片、参考视频和参考音频。
+- 生成结果下载为 Blob 后保存到浏览器本地，避免预览直接依赖外部媒体 URL。
+- 长任务保存公开任务 ID，可继续查询同一个任务，不重新创建。
+
+不要为适配某个模型重写画布数据结构、删除原节点能力或把渠道配置硬编码到组件中。
+
+## 2. 配置和数据存储
+
+### 2.1 AI 配置
+
+`web/src/stores/use-config-store.ts` 管理：
+
+- `baseUrl`、`apiKey`、当前模型和各能力默认模型。
+- OpenAI/Gemini 请求格式。
+- 图片同步/异步模式、返回格式和轮询参数。
+- 视频时长、比例、清晰度、音频、参考模式和模型级覆盖。
+
+AI 配置持久化在浏览器本地。前端不能把 API Key 写进仓库、服务端日志、URL query、画布导出文件或公开错误信息。
+
+模型级配置由 `resolveModelRequestConfig` 合并。画布节点显式选择的当前模型优先；只有当前模型不属于目标能力时，才回退全局图片/视频默认模型。不能让历史 `videoModel` 覆盖节点刚选择的模型。
+
+### 2.2 画布和媒体
+
+- 画布和节点数据保存在浏览器本地，并可按原项目机制导入、导出或 WebDAV 同步。
+- 图片二进制由 `web/src/services/image-storage.ts` 管理。
+- 视频/音频二进制由 `web/src/services/file-storage.ts` 管理。
+- 图片、视频和音频的 `storageKey` 指向本地存储，`blob:` URL只用于当前页面即时预览。
+- 生成历史、任务恢复信息和画布节点引用必须保存公开任务 ID，不能保存供应商任务 ID或内部地址。
+
+浏览器存储可能被用户清理。代码必须允许本地 Blob 丢失时给出明确错误，不能静默改用外部 URL或重新创建收费任务。
+
+## 3. 图片调用链
+
+主要入口：`web/src/services/api/image.ts`。
+
+### 3.1 OpenAI Images
+
+| 能力 | 接口 | 请求格式 |
+| --- | --- | --- |
+| 文生图 | `POST /v1/images/generations` | JSON |
+| 图片编辑/图生图 | `POST /v1/images/edits` | multipart |
+| 异步生成查询 | `GET /v1/images/generations/{task_id}` | JSON |
+| 异步编辑查询 | `GET /v1/images/edits/{task_id}` | JSON |
+
+行为约束：
+
+1. 默认使用显式同步模式。
+2. 只有用户选择异步时才发送 `async=true`，并带唯一 `Idempotency-Key`。
+3. 同步错误不得自动切成异步重提；创建响应已有任务 ID时只轮询该任务。
+4. 固定清晰度模型传 `image_size` 和可选 `aspect_ratio`；普通模型传 `size`、`quality` 和 `response_format`。
+5. 解析器兼容 `data`、`images`、`output`、`results` 以及嵌套 `result/response`，支持 URL、base64 和常见字段别名。
+6. 平台 URL 必须是允许的媒体代理路径；外部图片 URL不能作为静默回退。
+
+### 3.2 Gemini native 生图
+
+- 接口：`POST /v1beta/models/{model}:generateContent`。
+- 提示词和参考图放在 `contents[].parts`。
+- 请求 IMAGE 模态，清晰度和比例通过 `generationConfig.imageConfig` 传递。
+- 结果解析兼容 `inlineData`、`inline_data` 和文件引用。
+- Gemini 调用格式不支持蒙版时应直接提示，不能把蒙版丢弃后继续提交。
+
+### 3.3 本地预览
+
+接口结果先解析为图片数据，再保存到 IndexedDB/本地素材库，并使用本地 Blob 或 data URL预览。保存失败时可以保留当前页面的即时预览，但必须提示持久化失败；刷新后不可恢复的结果不能伪装成已保存素材。
+
+## 4. 视频调用链
+
+主要入口：`web/src/services/api/video.ts`。
+
+52Token 默认使用统一视频任务接口：
+
+```text
+POST /v1/videos
+GET  /v1/videos/{task_id}
+GET  /v1/videos/{task_id}/content
+```
+
+工作流：
+
+1. `createVideoGenerationTask` 根据当前节点模型和模型级配置选择适配器。
+2. `buildOpenAIVideoPayload` 把画布上游的图片、视频和音频按模型转换成 JSON 或 multipart 字段。
+3. 创建请求带唯一 `Idempotency-Key`，成功后立即通过 `onTaskChange` 保存公开任务 ID和轮询参数。
+4. `waitForVideoGenerationTask` 默认每 5 秒查询，最长 360 次；临时查询错误只重试查询，不重建任务。
+5. 到达前端查询窗口后抛出“查询已暂停”，用户继续查询时复用原任务。
+6. 完成后只通过 `/content` 或平台媒体代理地址下载为 Blob，验证确实是可播放视频，再写入本地素材和节点。
+
+`requestVideoGeneration` 接收已有 `task` 时必须走恢复分支。任何 UI“继续查询”按钮都只能传回该任务，不能再次调用创建接口。
+
+## 5. 参考素材与画布拉线
+
+生成配置节点从上游连接收集：
+
+- 文本节点内容作为 `prompt`。
+- 图片节点作为 `ReferenceImage[]`。
+- 视频节点作为 `ReferenceVideo[]`。
+- 音频节点作为 `ReferenceAudio[]`。
+
+除模型协议明确限制外，不要只取第一张图片。素材顺序应与画布连接顺序稳定一致，便于首尾帧和多参考图语义保持可预测。
+
+当前适配边界：
+
+| 模型族 | 图片 | 视频 | 音频 | 特殊规则 |
+| --- | ---: | ---: | ---: | --- |
+| Seedance 标准 | 4 | 3 | 1 | 参考视频/音频需至少一张图；首尾帧必须成对且不能混用其他素材 |
+| Seedance 固定分辨率 | 9 | 3 | 3 | 时长必填；模型后缀决定分辨率；其他规则同标准模型 |
+| Grok | 7 | 1 | 0 | 不支持首尾帧；Grok 1.5 单独要求恰好一张图 |
+| Omni Fast | 5 | 0 | 0 | 多图使用 multipart；首尾帧模式最多两张 |
+| Omni V2V | 0 | 1 | 0 | 必须一个视频且不超过 5MB |
+| Sora | 1 | 0 | 0 | 图片按首帧模式传递 |
+| Veo | 2-3 | 0 | 0 | 标准模型为 frame，`ref` 模型为 image |
+
+直接 API 常用 HTTPS URL。用户从画布连接本地素材时，适配层负责读取 IndexedDB/Blob 并转换；组件层不应自行拼请求字段。
+
+## 6. 媒体 URL 和安全边界
+
+- API Base URL负责模型列表、图片创建/编辑、视频创建/查询和鉴权。
+- 图片/视频完成后的媒体 URL可以来自独立的平台下载域名，但必须属于允许的平台代理路径。
+- 视频校验前不写入素材库；HTML/JSON 错误页不能当作视频 Blob 保存。
+- 禁止在客户端解析或展示供应商地址、供应商任务 ID、账号 Base URL和原始认证头。
+- 禁止添加“平台代理失败后直接使用外部 URL”的 fallback。这会在浏览器 Network 暴露外部地址。
+
+## 7. 不可破坏清单
+
+- 默认主题、布局、节点和画布交互沿用原项目，不为接口适配重做视觉系统。
+- 文生图、图生图、图片编辑、文生视频、图生视频和画布拉线均使用同一配置与服务层。
+- 节点显式模型不被历史全局模型覆盖。
+- 图片默认同步，异步只能手动选择；失败不自动换模式重提。
+- 视频创建只执行一次；轮询错误、暂停、页面恢复和继续查询不重复创建或扣费。
+- 多参考素材不在组件层截断；只按模型限制在适配层校验。
+- 生成图片和视频保存在浏览器本地并可直接预览。
+- API Key 只保存在浏览器本地，不进入仓库、导出数据、URL或日志。
+- 媒体预览和下载不直接访问外部生成地址。
+
+## 8. 合并原项目升级流程
+
+1. 记录当前工作台生产镜像、commit、回滚镜像和浏览器数据格式。
+2. 获取原项目新版本，先审查 `web/src/stores/use-config-store.ts`、节点 metadata、图片/视频 service、IndexedDB 和导入导出变化。
+3. 以原项目节点/状态模型为主，重新移植接口适配；不要长期保留两套画布状态或两套媒体存储。
+4. 冲突按“配置 -> 服务适配 -> 节点传参 -> UI”顺序处理，每层完成后立即跑 TypeScript 和目标测试。
+5. 只有在全部回归通过后才更新 Docker 镜像；生产服务器只拉取镜像，不执行源码构建。
+
+高风险文件：
+
+- `web/src/stores/use-config-store.ts`
+- `web/src/services/api/image.ts`
+- `web/src/services/api/video.ts`
+- `web/src/services/image-storage.ts`
+- `web/src/services/file-storage.ts`
+- 画布生成配置、图片节点、视频节点和资产导入导出组件
+
+## 9. 验证清单
+
+```bash
+cd web
+bun install --frozen-lockfile
+bun run build
+bun run format:check
+
+cd ../docs
+bun install --frozen-lockfile
+bun run types:check
+bun run build
+```
+
+实际脚本以当前 `package.json` 为准。至少补充以下浏览器回归：
+
+1. 图片页同步生成、手动异步、图片编辑、多图、本地预览和刷新恢复。
+2. 视频页创建、长轮询、暂停后继续、下载、播放和刷新恢复。
+3. 画布文本到图片、图片到图片、文本到视频、单图/多图到视频、视频/音频到视频。
+4. 桌面和移动端配置弹窗、模型下拉、素材预览、进度和错误状态无重叠。
+5. Network 中没有外部生成地址，视频创建 POST 只有一次，后续只有 GET 查询/下载。
+
+真实收费回归应使用最小任务数量，并同时核对工作台任务、Sub2API usage 和平台余额；不要用自动循环创建媒体任务。

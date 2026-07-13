@@ -16,6 +16,7 @@
 ## 开发与数据
 
 - [本地开发](/docs/backend/local-development)
+- [Sub2API 适配与二开维护](/docs/backend/sub2api-integration)
 - [画布数据结构](/docs/backend/canvas-data-structure)
 
 ## 商务合作

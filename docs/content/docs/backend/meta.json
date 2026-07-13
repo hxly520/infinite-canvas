@@ -4,6 +4,7 @@
   "defaultOpen": true,
   "pages": [
     "local-development",
+    "sub2api-integration",
     "canvas-data-structure"
   ]
 }
