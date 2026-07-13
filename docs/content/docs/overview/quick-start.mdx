@@ -46,6 +46,7 @@ docker compose -f docker-compose.local.yml up -d --build
 
 - 默认渠道已预置 `https://image.52token.org`，先打开右上角配置弹窗，填入自己的分组 `API Key`。
 - 使用 Image2 时选择 OpenAI 渠道的 `gpt-image-2`；使用 Gemini banana 时选择 Gemini 渠道的对应模型。
+- 生成视频时选择当前分组可用的视频模型；工作台会通过统一 `/v1/videos` 接口创建并查询任务，完成后下载到浏览器本地。
 - 如果需要提示词仓库内容，打开 `/prompts` 会由浏览器前端直连拉取并缓存到 IndexedDB。
 - 如果需要跨设备同步画布、素材和生成记录，可在配置弹窗中填写 WebDAV。
 
