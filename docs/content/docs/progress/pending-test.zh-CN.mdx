@@ -7,6 +7,7 @@ description: 当前版本已实现但仍需人工验证的变更项
 
 ## v0.15.1 二开兼容升级
 
+- 验证版本弹窗读取 `hxly520/infinite-canvas` 私有主线的 `VERSION` 与 `CHANGELOG.md`；插件注册表仍从官方 `basketikun/infinite-canvas@plugins-dist` 加载，Canvas Agent 的官方 NPM 版本检查不受影响。
 - 验证旧版批量图片画布首次打开后迁移为单节点多图片，主图、删除、重试和连接关系正常。
 - 验证 52Token Image2 同步生图、手动异步生图、图片编辑以及平台代理 URL 下载后本地保存。
 - 验证 Seedance、Grok、Omni、Sora、Veo 创建、长轮询、刷新恢复和媒体代理下载，Network 中创建请求仅发生一次。
