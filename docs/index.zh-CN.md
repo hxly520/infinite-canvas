@@ -17,6 +17,7 @@
 
 - [本地开发](/zh-CN/docs/development/local-development)
 - [画布数据结构](/zh-CN/docs/development/canvas-data-structure)
+- [Sub2API 适配与二开维护](/zh-CN/docs/development/sub2api-integration)
 
 ## 商务合作
 

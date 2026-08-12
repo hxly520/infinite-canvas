@@ -6,6 +6,7 @@ import i18n from "@/i18n";
 import { localForageStorage } from "@/lib/localforage-storage";
 import type { CanvasBackgroundMode } from "@/lib/canvas-theme";
 import type { CanvasAssistantSession, CanvasConnection, CanvasNodeData, ViewportTransform } from "@/types/canvas";
+import { migrateLegacyBatchProject as migrateLegacyBatchProjectData } from "@/lib/canvas/legacy-batch-migration";
 
 export type CanvasProject = {
     id: string;
@@ -130,6 +131,16 @@ export const useCanvasStore = create<CanvasStore>()(
             onRehydrateStorage: () => () => {
                 useCanvasStore.setState({ hydrated: true });
             },
+            version: 2,
+            migrate: (persisted) => ({ ...(persisted as CanvasStore), ...migrateLegacyCanvasState(persisted as PersistedCanvasState) }),
         },
     ),
 );
+
+export function migrateLegacyCanvasState(state: PersistedCanvasState): PersistedCanvasState {
+    return { ...state, projects: (state.projects || []).map(migrateLegacyBatchProject) };
+}
+
+function migrateLegacyBatchProject(project: CanvasProject): CanvasProject {
+    return migrateLegacyBatchProjectData(project);
+}

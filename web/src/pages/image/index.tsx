@@ -10,8 +10,9 @@ import { ModelPicker } from "@/components/model-picker";
 import { PromptSelectDialog } from "@/components/prompts/prompt-select-dialog";
 import { AssetPickerModal, type InsertAssetPayload } from "@/components/canvas/asset-picker-modal";
 import { canvasThemes } from "@/lib/canvas-theme";
+import { fixedImageTier } from "@/lib/image-model";
 import { imageReferenceLabel } from "@/lib/image-reference-prompt";
-import { modelOptionLabel, useConfigStore, useEffectiveConfig, type AiConfig } from "@/stores/use-config-store";
+import { modelOptionLabel, modelOptionName, useConfigStore, useEffectiveConfig, type AiConfig } from "@/stores/use-config-store";
 import { useThemeStore } from "@/stores/use-theme-store";
 import { nanoid } from "nanoid";
 import { formatBytes, formatDuration, getDataUrlByteSize, readImageMeta } from "@/lib/image-utils";
@@ -60,7 +61,7 @@ type GenerationLog = {
     thumbnails: string[];
 };
 
-type GenerationLogConfig = Pick<AiConfig, "model" | "imageModel" | "quality" | "size" | "count">;
+type GenerationLogConfig = Pick<AiConfig, "model" | "imageModel" | "quality" | "size" | "count" | "imageDispatchMode" | "imageConcurrency">;
 
 type UpdateAiConfig = <K extends keyof AiConfig>(key: K, value: AiConfig[K]) => void;
 
@@ -103,7 +104,7 @@ export default function ImagePage() {
 
     const model = effectiveConfig.imageModel || effectiveConfig.model;
     const canGenerate = Boolean(prompt.trim());
-    const generationCount = Math.max(1, Math.min(10, Number(config.count) || 1));
+    const generationCount = fixedImageTier(modelOptionName(model)) ? 1 : Math.max(1, Math.min(10, Math.floor(Math.abs(Number(config.count)) || 1)));
 
     useEffect(() => {
         if (!running || !startedAt) return;
@@ -177,9 +178,7 @@ export default function ImagePage() {
         const batchStartedAt = performance.now();
         setStartedAt(batchStartedAt);
 
-        const tasks = Array.from({ length: generationCount }, (_, index) => runGenerationSlot(index, snapshot));
-
-        const result = await Promise.allSettled(tasks);
+        const result = await runWithConcurrency(generationCount, readImageConcurrency(snapshot.config.imageConcurrency), (index) => runGenerationSlot(index, snapshot));
         const successImages = result.filter((item): item is PromiseFulfilledResult<GeneratedImage> => item.status === "fulfilled").map((item) => item.value);
         const successCount = successImages.length;
         const failCount = generationCount - successCount;
@@ -188,12 +187,9 @@ export default function ImagePage() {
         if (agentTaskId) updateAgentTask(agentTaskId, { status: successCount ? "succeeded" : "failed", successCount, failCount, error: successCount ? undefined : error });
 
         try {
-            const logImages = await Promise.all(
-                successImages.map(async (image) => {
-                    const stored = await uploadImage(image.dataUrl);
-                    return { ...image, dataUrl: stored.url, storageKey: stored.storageKey, width: stored.width, height: stored.height, bytes: stored.bytes, mimeType: stored.mimeType };
-                }),
-            );
+            const persisted = await Promise.allSettled(successImages.map(persistGeneratedImage));
+            const logImages = persisted.map((item, index) => (item.status === "fulfilled" ? item.value : successImages[index]));
+            if (persisted.some((item) => item.status === "rejected")) message.warning(t("imageWorkbench.persistenceFailed"));
             saveLog(
                 buildLog({
                     prompt: text,
@@ -293,7 +289,7 @@ export default function ImagePage() {
     };
 
     const saveLog = (log: GenerationLog) => {
-        void logStore.setItem(log.id, serializeLog(log)).then(refreshLogs);
+        void logStore.setItem(log.id, serializeLog(log)).then(refreshLogs).catch(() => message.warning(t("imageWorkbench.persistenceFailed")));
     };
 
     const refreshLogs = async () => setLogs(await readStoredLogs());
@@ -307,6 +303,8 @@ export default function ImagePage() {
         if (log.config.quality) updateConfig("quality", log.config.quality);
         if (log.config.size) updateConfig("size", log.config.size);
         if (log.config.count) updateConfig("count", log.config.count);
+        updateConfig("imageDispatchMode", normalizeStoredImageDispatchMode(log.config.imageDispatchMode));
+        if (log.config.imageConcurrency) updateConfig("imageConcurrency", log.config.imageConcurrency);
         setResults(log.images.map((image) => ({ id: image.id, status: "success", image })));
     };
 
@@ -340,6 +338,13 @@ export default function ImagePage() {
         }
     };
 
+    const persistGeneratedImage = async (image: GeneratedImage) => {
+        const stored = await uploadImage(image.dataUrl);
+        const persisted = { ...image, dataUrl: stored.url, storageKey: stored.storageKey, width: stored.width, height: stored.height, bytes: stored.bytes, mimeType: stored.mimeType };
+        setResults((value) => value.map((item) => (item.image?.id === image.id ? { ...item, image: persisted } : item)));
+        return persisted;
+    };
+
     const retryResult = async (index: number) => {
         const snapshot = buildRequestSnapshot();
         if (!snapshot) return;
@@ -348,9 +353,12 @@ export default function ImagePage() {
         const retryStartedAt = performance.now();
         try {
             const image = await runGenerationSlot(index, snapshot);
-            const stored = await uploadImage(image.dataUrl);
-            const logImage = { ...image, dataUrl: stored.url, storageKey: stored.storageKey, width: stored.width, height: stored.height, bytes: stored.bytes, mimeType: stored.mimeType };
-            setResults((value) => updateResultAt(value, index, { image: { ...image, dataUrl: stored.url, storageKey: stored.storageKey } }));
+            let logImage = image;
+            try {
+                logImage = await persistGeneratedImage(image);
+            } catch {
+                message.warning(t("imageWorkbench.persistenceFailed"));
+            }
             saveLog(
                 buildLog({
                     prompt: snapshot.text,
@@ -574,7 +582,7 @@ function GenerationSettings({ config, model, updateConfig, openConfigDialog }: {
                 <ModelPicker config={config} value={model} onChange={(value) => updateConfig("imageModel", value)} capability="image" fullWidth onMissingConfig={() => openConfigDialog(false)} />
             </label>
             <div className="col-span-2">
-                <ImageSettingsPanel config={config} onConfigChange={(key, value) => updateConfig(key, value)} theme={theme} showTitle={false} className="space-y-4" maxCount={10} />
+                <ImageSettingsPanel config={config} onConfigChange={(key, value) => updateConfig(key, value)} theme={theme} showTitle={false} className="space-y-4" maxCount={10} showAdvancedControls />
             </div>
         </>
     );
@@ -841,7 +849,36 @@ function normalizeLogConfig(log: Partial<GenerationLog>): GenerationLogConfig {
         quality: log.config?.quality || log.quality || "",
         size: log.config?.size || log.size || "",
         count: log.config?.count || String(log.imageCount || log.successCount || 1),
+        imageDispatchMode: normalizeStoredImageDispatchMode(log.config?.imageDispatchMode),
+        imageConcurrency: log.config?.imageConcurrency || "5",
     };
+}
+
+function normalizeStoredImageDispatchMode(value: unknown): AiConfig["imageDispatchMode"] {
+    return value === "async" ? "async" : "sync";
+}
+
+async function runWithConcurrency<T>(count: number, concurrency: number, task: (index: number) => Promise<T>) {
+    const results = new Array<PromiseSettledResult<T>>(count);
+    let nextIndex = 0;
+    const worker = async () => {
+        for (;;) {
+            const index = nextIndex;
+            nextIndex += 1;
+            if (index >= count) return;
+            try {
+                results[index] = { status: "fulfilled", value: await task(index) };
+            } catch (reason) {
+                results[index] = { status: "rejected", reason };
+            }
+        }
+    };
+    await Promise.all(Array.from({ length: Math.min(count, concurrency) }, worker));
+    return results;
+}
+
+function readImageConcurrency(value: string) {
+    return Math.max(1, Math.min(10, Math.floor(Math.abs(Number(value)) || 5)));
 }
 
 function moveListItem<T>(items: T[], index: number, offset: number) {
@@ -889,6 +926,8 @@ function buildLog({
         quality: config.quality,
         size: config.size,
         count: config.count,
+        imageDispatchMode: config.imageDispatchMode,
+        imageConcurrency: config.imageConcurrency,
     };
     return {
         id: nanoid(),

@@ -1,5 +1,5 @@
 import i18n from "@/i18n";
-import { resolveModelRequestConfig, type AiConfig } from "@/stores/use-config-store";
+import { modelOptionName, resolveModelRequestConfig, type AiConfig } from "@/stores/use-config-store";
 import type { ReferenceImage } from "@/types/image";
 import type { ReferenceAudio, ReferenceVideo } from "@/types/media";
 
@@ -30,6 +30,7 @@ export const seedanceRatioOptions = [
 ] as const;
 
 export const seedanceDurationOptions = [-1, 4, 5, 6, 8, 10, 12, 15] as const;
+export type VideoReferenceMode = "auto" | "frames";
 
 const seedancePixels = {
     "480p": {
@@ -58,13 +59,46 @@ const seedancePixels = {
     },
 } as const;
 
-export function isSeedanceVideoConfig(config: AiConfig | Pick<AiConfig, "model" | "videoModel" | "apiFormat">) {
+export function isSeedanceVideoConfig(config: AiConfig | Pick<AiConfig, "model" | "videoModel" | "apiFormat" | "baseUrl">) {
     const requestConfig = "channels" in config ? resolveModelRequestConfig(config, config.model || config.videoModel) : config;
-    return requestConfig.apiFormat === "ark";
+    return requestConfig.apiFormat === "ark" || isSeedanceVideoModel(modelOptionName(requestConfig.model || requestConfig.videoModel)) || isArkPlanBaseUrl(requestConfig.baseUrl);
 }
 
-export function normalizeSeedanceResolution(value: string) {
+export function isSeedanceVideoModel(model: string) {
+    const value = model.toLowerCase();
+    return value.includes("seedance") || value.includes("doubao-seedance");
+}
+
+export function isArkPlanBaseUrl(baseUrl: string) {
+    return baseUrl.toLowerCase().includes("/api/plan/v3");
+}
+
+export function normalizeVideoReferenceMode(value: string | undefined): VideoReferenceMode {
+    return value === "frames" ? "frames" : "auto";
+}
+
+export function supportsVideoFrameMode(model: string) {
+    const value = modelOptionName(model).toLowerCase();
+    return isSeedanceVideoModel(value) || value.includes("omni-fast");
+}
+
+export function isSeedanceFastModel(model: string) {
+    return isSeedanceVideoModel(model) && model.toLowerCase().includes("fast");
+}
+
+export function seedanceFixedResolution(model: string) {
+    const match = model.toLowerCase().match(/(?:^|[-_])(480p|720p|1080p|2160p|4k)(?:$|[-_])/);
+    if (!match) return "";
+    return match[1] === "2160p" ? "4k" : match[1];
+}
+
+export function isSeedancePerSecondModel(model: string) {
+    return isSeedanceVideoModel(model) && Boolean(seedanceFixedResolution(model));
+}
+
+export function normalizeSeedanceResolution(value: string, model = "") {
     const normalized = normalizeResolutionToken(value);
+    if (isSeedanceFastModel(model) && normalized === "1080p") return "720p";
     return seedanceResolutionOptions.some((item) => item.value === normalized) ? normalized : "720p";
 }
 
@@ -129,7 +163,8 @@ export function buildSeedancePromptText(prompt: string, images: ReferenceImage[]
     return i18n.t("seedance.promptPrefix", { labels: labels.join(i18n.t("seedance.separator")), prompt: text });
 }
 
-export function seedanceVideoReferenceError(videos: ReferenceVideo[]) {
+export function seedanceVideoReferenceError(videos: ReferenceVideo[], model = "") {
+    const standardModel = isSeedanceVideoModel(model) && !isSeedancePerSecondModel(model);
     let totalDurationMs = 0;
     for (let index = 0; index < videos.length; index += 1) {
         const video = videos[index];
@@ -137,7 +172,8 @@ export function seedanceVideoReferenceError(videos: ReferenceVideo[]) {
         if (!SEEDANCE_VIDEO_MIME_TYPES.includes(video.type)) return i18n.t("seedance.errors.format", { label });
         if (video.bytes && video.bytes > SEEDANCE_REFERENCE_LIMITS.videoMaxBytes) return i18n.t("seedance.errors.size", { label });
         if (video.durationMs) {
-            if (video.durationMs < 2000 || video.durationMs > 15000) return i18n.t("seedance.errors.duration", { label });
+            const minimum = standardModel ? 4000 : 2000;
+            if (video.durationMs < minimum || video.durationMs > 15000) return i18n.t("seedance.errors.duration", { label });
             totalDurationMs += video.durationMs;
         }
         if (video.width && video.height) {

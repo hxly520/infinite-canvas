@@ -1,5 +1,5 @@
 import i18n from "@/i18n";
-import type { PromptSource } from "./prompt-source-presets";
+import { XIAN_YU_PROMPT_SOURCE_ID, type PromptSource } from "./prompt-source-presets";
 
 export type RawPrompt = {
     id: string;
@@ -38,14 +38,57 @@ export async function runPromptSource(source: PromptSource, options?: RunOptions
         throw new Error(i18n.t("config.promptSources.runtime.fetchFailed", { name: source.name, error: error instanceof Error ? error.message : String(error) }));
     }
 
-    const items = parseJsonSource(data, source);
+    const items = parsePromptSourceData(data, source);
     if (source.builtIn && !items.length) throw new Error(i18n.t("config.promptSources.runtime.noPrompts", { name: source.name }));
     return items;
 }
 
-function parseJsonSource(data: unknown, source: PromptSource) {
+export function parsePromptSourceData(data: unknown, source: PromptSource) {
+    if (source.id === XIAN_YU_PROMPT_SOURCE_ID) return normalizeXianyuItems(data, source);
     if (!Array.isArray(data)) throw new Error(i18n.t("config.promptSources.runtime.invalidRoot", { name: source.name }));
     return normalizeItems(data, source);
+}
+
+function normalizeXianyuItems(value: unknown, source: PromptSource) {
+    const seen = new Set<string>();
+    const items: RawPrompt[] = [];
+    arrayValue(asRecord(value).dates).forEach((dateValue, dateIndex) => {
+        const date = asRecord(dateValue);
+        arrayValue(date.items).forEach((itemValue, itemIndex) => {
+            const item = asRecord(itemValue);
+            const prompt = stringValue(item.prompt).trim();
+            const referenceImageUrls = [stringValue(item.primary_image_url), ...stringArray(item.image_urls)]
+                .map((url) => url.trim())
+                .filter(isVisibleImageUrl)
+                .filter((url, index, urls) => urls.indexOf(url) === index);
+            if (!prompt || !referenceImageUrls.length) return;
+            const reason = stringValue(item.reason).replace(/^reusable\s+/i, "").trim();
+            const author = stringValue(item.author).trim();
+            const title = reason || author || prompt.slice(0, 32);
+            const duplicateKey = `${title.toLowerCase()}\n${prompt.toLowerCase()}`;
+            if (seen.has(duplicateKey)) return;
+            seen.add(duplicateKey);
+            const sourceUrl = stringValue(item.source_url || item.x_url || item.url).trim();
+            const createdAt = stringValue(item.created_at || date.date).trim();
+            const tags = ["gpt-image-2", author, Number(item.engagement_score) > 0 ? "高互动" : ""].filter(Boolean);
+            items.push({
+                id: `${source.id}-${leftPad(dateIndex + 1)}-${leftPad(itemIndex + 1)}`,
+                title,
+                prompt,
+                description: reason,
+                coverUrl: referenceImageUrls[0],
+                referenceImageUrls,
+                tags,
+                preview: [reason, sourceUrl, ...referenceImageUrls.map((url) => `![](${url})`)].filter(Boolean).join("\n\n"),
+                createdAt,
+                updatedAt: createdAt,
+                author: author || undefined,
+                sourceUrl: absoluteUrl(source.url, sourceUrl),
+                imageModel: "gpt-image-2",
+            });
+        });
+    });
+    return items;
 }
 
 function normalizeItems(values: unknown[], source: PromptSource) {
@@ -93,6 +136,14 @@ function stringValue(value: unknown) {
 
 function stringArray(value: unknown) {
     return Array.isArray(value) ? value.map(stringValue).map((item) => item.trim()).filter(Boolean) : [];
+}
+
+function arrayValue(value: unknown): unknown[] {
+    return Array.isArray(value) ? value : [];
+}
+
+function isVisibleImageUrl(value: string) {
+    return /^https?:\/\//i.test(value);
 }
 
 function optionalString(value: unknown) {

@@ -8,6 +8,8 @@ import i18n from "@/i18n";
 export type ApiCallFormat = "openai" | "gemini" | "ark";
 export type ModelCapability = "image" | "video" | "text" | "audio";
 export type ReasoningEffort = "auto" | "low" | "medium" | "high" | "xhigh";
+export type ImageDispatchMode = "sync" | "async";
+export type ImageResponseFormat = "b64_json" | "url";
 
 export type ChannelModel = {
     name: string;
@@ -51,6 +53,12 @@ export type AiConfig = {
     background: string;
     count: string;
     canvasImageCount: string;
+    imageDispatchMode: ImageDispatchMode;
+    imageResponseFormat: ImageResponseFormat;
+    imagePollIntervalMs: string;
+    imagePollTimeoutMs: string;
+    imageConcurrency: string;
+    videoReferenceMode: "auto" | "frames";
 };
 
 export type WebdavSyncConfig = {
@@ -64,9 +72,14 @@ export type ConfigTabKey = "channels" | "preferences" | "prompt-sources" | "webd
 
 export const CONFIG_STORE_KEY = "infinite-canvas:ai_config_store";
 const CHANNEL_MODEL_SEPARATOR = "::";
-const OPENAI_BASE_URL = "https://api.openai.com";
-const GEMINI_BASE_URL = "https://generativelanguage.googleapis.com";
+const TOKEN52_IMAGE_BASE_URL = "https://image.52token.org";
+const OPENAI_BASE_URL = TOKEN52_IMAGE_BASE_URL;
+const GEMINI_BASE_URL = TOKEN52_IMAGE_BASE_URL;
 const ARK_BASE_URL = "https://ark.cn-beijing.volces.com/api/v3";
+const IMAGE2_CHANNEL_ID = "52token-image2";
+const GEMINI_IMAGE_CHANNEL_ID = "52token-gemini-image";
+const IMAGE2_MODEL = "gpt-image-2";
+const GEMINI_IMAGE_MODELS = ["gemini-3.1-flash-image-preview", "gemini-3-pro-image-preview", "banana-2", "banana-pro"];
 
 export const defaultConfig: AiConfig = {
     channelMode: "local",
@@ -75,24 +88,29 @@ export const defaultConfig: AiConfig = {
     apiFormat: "openai",
     channels: [
         {
-            id: "default",
-            name: i18n.t("config.channels.defaultName"),
+            id: IMAGE2_CHANNEL_ID,
+            name: "52Token Image2",
             baseUrl: OPENAI_BASE_URL,
             apiKey: "",
             apiFormat: "openai",
             models: [
-                { name: "gpt-image-2", capability: "image" },
-                { name: "grok-imagine-video", capability: "video" },
-                { name: "gpt-5.5", capability: "text" },
-                { name: "gpt-4o-mini-tts", capability: "audio" },
+                { name: IMAGE2_MODEL, capability: "image" },
             ],
         },
+        {
+            id: GEMINI_IMAGE_CHANNEL_ID,
+            name: "52Token Gemini 生图",
+            baseUrl: GEMINI_BASE_URL,
+            apiKey: "",
+            apiFormat: "gemini",
+            models: GEMINI_IMAGE_MODELS.map((name) => ({ name, capability: "image" as const })),
+        },
     ],
-    model: "default::gpt-image-2",
-    imageModel: "default::gpt-image-2",
-    videoModel: "default::grok-imagine-video",
-    textModel: "default::gpt-5.5",
-    audioModel: "default::gpt-4o-mini-tts",
+    model: `${IMAGE2_CHANNEL_ID}::${IMAGE2_MODEL}`,
+    imageModel: `${IMAGE2_CHANNEL_ID}::${IMAGE2_MODEL}`,
+    videoModel: "",
+    textModel: "",
+    audioModel: "",
     audioVoice: "alloy",
     audioFormat: "mp3",
     audioSpeed: "1",
@@ -103,12 +121,18 @@ export const defaultConfig: AiConfig = {
     videoWatermark: "false",
     systemPrompt: "",
     reasoningEffort: "auto",
-    models: ["default::gpt-image-2", "default::grok-imagine-video", "default::gpt-5.5", "default::gpt-4o-mini-tts"],
+    models: [`${IMAGE2_CHANNEL_ID}::${IMAGE2_MODEL}`, ...GEMINI_IMAGE_MODELS.map((model) => `${GEMINI_IMAGE_CHANNEL_ID}::${model}`)],
     quality: "auto",
     size: "1:1",
     background: "",
     count: "1",
     canvasImageCount: "3",
+    imageDispatchMode: "sync",
+    imageResponseFormat: "b64_json",
+    imagePollIntervalMs: "2500",
+    imagePollTimeoutMs: "600000",
+    imageConcurrency: "5",
+    videoReferenceMode: "auto",
 };
 
 export const defaultWebdavSyncConfig: WebdavSyncConfig = {
@@ -133,9 +157,9 @@ type ConfigStore = {
     clearPromptContinue: () => void;
 };
 
-const VIDEO_KEYWORDS = ["seedance", "video", "sora", "veo", "kling", "wan", "hailuo"];
+const VIDEO_KEYWORDS = ["seedance", "video", "vedio", "sora", "veo", "kling", "wan", "hailuo", "omni"];
 const AUDIO_KEYWORDS = ["audio", "tts", "speech", "voice", "music", "sound"];
-const IMAGE_KEYWORDS = ["seedream", "gpt-image", "image", "dall-e", "dalle", "imagen", "flux", "sdxl", "stable-diffusion", "midjourney"];
+const IMAGE_KEYWORDS = ["seedream", "gpt-image", "image", "banana", "dall-e", "dalle", "imagen", "flux", "sdxl", "stable-diffusion", "midjourney"];
 
 /** Best-effort default capability for a freshly fetched model name; user can override in the channel editor. */
 export function guessCapability(name: string): ModelCapability {
@@ -247,6 +271,12 @@ export const useConfigStore = create<ConfigStore>()(
                         videoGenerateAudio: config.videoGenerateAudio || "true",
                         videoWatermark: config.videoWatermark || "false",
                         canvasImageCount: config.canvasImageCount || "3",
+                        imageDispatchMode: normalizeImageDispatchMode(config.imageDispatchMode),
+                        imageResponseFormat: normalizeImageResponseFormat(config.imageResponseFormat),
+                        imagePollIntervalMs: config.imagePollIntervalMs || defaultConfig.imagePollIntervalMs,
+                        imagePollTimeoutMs: config.imagePollTimeoutMs || defaultConfig.imagePollTimeoutMs,
+                        imageConcurrency: config.imageConcurrency || defaultConfig.imageConcurrency,
+                        videoReferenceMode: config.videoReferenceMode === "frames" ? "frames" : "auto",
                     },
                 };
             },
@@ -378,6 +408,14 @@ export function defaultBaseUrlForApiFormat(apiFormat: ApiCallFormat) {
 
 function normalizeApiFormat(apiFormat: unknown): ApiCallFormat {
     return apiFormat === "gemini" || apiFormat === "ark" ? apiFormat : "openai";
+}
+
+function normalizeImageDispatchMode(value: unknown): ImageDispatchMode {
+    return value === "async" ? "async" : "sync";
+}
+
+function normalizeImageResponseFormat(value: unknown): ImageResponseFormat {
+    return value === "url" ? "url" : "b64_json";
 }
 
 function uniqueModelOptions(models: string[]) {

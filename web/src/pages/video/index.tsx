@@ -15,7 +15,7 @@ import { formatBytes, formatDuration } from "@/lib/image-utils";
 import { boolConfig, isSeedanceVideoConfig, normalizeSeedanceRatio, seedanceReferenceLabel, seedanceVideoReferenceError, seedanceVideoReferenceHint, SEEDANCE_REFERENCE_LIMITS, SEEDANCE_VIDEO_MIME_TYPES } from "@/lib/seedance-video";
 import { deleteStoredMedia, resolveMediaUrl, uploadMediaFile } from "@/services/file-storage";
 import { resolveImageUrl, uploadImage } from "@/services/image-storage";
-import { createVideoGenerationTask, pollVideoGenerationTask, storeGeneratedVideo, type VideoGenerationTask } from "@/services/api/video";
+import { createVideoGenerationIdempotencyKey, createVideoGenerationTask, storeGeneratedVideo, VideoGenerationPollingPausedError, VideoGenerationTerminalError, waitForVideoGenerationTask, type VideoGenerationTask } from "@/services/api/video";
 import { useAssetStore } from "@/stores/use-asset-store";
 import { useWorkbenchAgentStore } from "@/stores/use-workbench-agent-store";
 import { modelOptionLabel, useConfigStore, useEffectiveConfig, type AiConfig } from "@/stores/use-config-store";
@@ -58,12 +58,13 @@ type GenerationLog = {
     resolution: string;
     seconds: string;
     status: "pending" | "success" | "failed";
+    idempotencyKey?: string;
     task?: VideoGenerationTask;
     video?: GeneratedVideo;
     error?: string;
 };
 
-type GenerationLogConfig = Pick<AiConfig, "model" | "videoModel" | "size" | "vquality" | "videoSeconds" | "videoGenerateAudio" | "videoWatermark">;
+type GenerationLogConfig = Pick<AiConfig, "model" | "videoModel" | "size" | "vquality" | "videoSeconds" | "videoGenerateAudio" | "videoWatermark" | "videoReferenceMode">;
 
 type UpdateAiConfig = <K extends keyof AiConfig>(key: K, value: AiConfig[K]) => void;
 
@@ -209,17 +210,29 @@ export default function VideoPage() {
         setPreviewLog(null);
         setResults([{ id: nanoid(), status: "pending" }]);
         const batchStartedAt = performance.now();
+        const idempotencyKey = createVideoGenerationIdempotencyKey();
+        const intentLog = buildLog({ prompt: snapshot.text, model, config: snapshot.config, references: snapshot.references, videoReferences: snapshot.videoReferences, audioReferences: snapshot.audioReferences, durationMs: 0, status: "pending", idempotencyKey });
         setStartedAt(batchStartedAt);
         try {
-            const task = await createVideoGenerationTask(snapshot.config, snapshot.text, snapshot.references, snapshot.videoReferences, snapshot.audioReferences);
-            const log = buildLog({ prompt: snapshot.text, model, config: snapshot.config, references: snapshot.references, videoReferences: snapshot.videoReferences, audioReferences: snapshot.audioReferences, durationMs: 0, status: "pending", task });
+            setPreviewLog(intentLog);
+            await saveLog(intentLog, false);
+            const task = await createVideoGenerationTask(snapshot.config, snapshot.text, snapshot.references, snapshot.videoReferences, snapshot.audioReferences, { idempotencyKey });
+            const log = { ...intentLog, task };
+            setPreviewLog(log);
             await saveLog(log, false);
             void pollGenerationLog(log, snapshot.config, agentTaskId);
         } catch (error) {
             const errorMessage = error instanceof Error ? error.message : t("workbench.generationFailed");
-            setResults([{ id: nanoid(), status: "failed", error: errorMessage }]);
+            const canCreateReplacement = error instanceof VideoGenerationTerminalError && error.canCreateReplacement;
+            setResults([{ id: intentLog.id, status: "failed", error: errorMessage }]);
             if (agentTaskId) updateAgentTask(agentTaskId, { status: "failed", successCount: 0, failCount: 1, error: errorMessage });
-            await saveLog(buildLog({ prompt: snapshot.text, model, config: snapshot.config, references: snapshot.references, videoReferences: snapshot.videoReferences, audioReferences: snapshot.audioReferences, durationMs: performance.now() - batchStartedAt, status: "failed", error: errorMessage }));
+            const failedLog = { ...intentLog, durationMs: performance.now() - batchStartedAt, status: "failed" as const, idempotencyKey: canCreateReplacement ? undefined : intentLog.idempotencyKey, error: errorMessage };
+            setPreviewLog(failedLog);
+            try {
+                await saveLog(failedLog);
+            } catch {
+                // The upstream request is not attempted when the local intent cannot be persisted.
+            }
             message.error(errorMessage);
             setRunning(false);
         }
@@ -267,6 +280,37 @@ export default function VideoPage() {
     };
 
     const retryResult = () => {
+        if (previewLog?.task && !previewLog.video) {
+            setResults([{ id: previewLog.id, status: "pending" }]);
+            void pollGenerationLog({ ...previewLog, error: undefined });
+            return;
+        }
+        if (previewLog?.idempotencyKey && !previewLog.video) {
+            const resumedLog = { ...previewLog, status: "pending" as const, error: undefined };
+            const taskConfig = buildVideoConfig({ ...effectiveConfig, ...resumedLog.config }, resumedLog.model);
+            setResults([{ id: resumedLog.id, status: "pending" }]);
+            setPreviewLog(resumedLog);
+            setRunning(true);
+            void saveLog(resumedLog, false)
+                .then(() => createVideoGenerationTask(taskConfig, resumedLog.prompt, resumedLog.references, resumedLog.videoReferences, resumedLog.audioReferences, { idempotencyKey: resumedLog.idempotencyKey }))
+                .then(async (task) => {
+                    const submittedLog = { ...resumedLog, task };
+                    setPreviewLog(submittedLog);
+                    await saveLog(submittedLog, false);
+                    await pollGenerationLog(submittedLog, taskConfig);
+                })
+                .catch(async (error) => {
+                    const errorMessage = error instanceof Error ? error.message : t("workbench.generationFailed");
+                    const canCreateReplacement = error instanceof VideoGenerationTerminalError && error.canCreateReplacement;
+                    const failedLog = { ...resumedLog, status: "failed" as const, idempotencyKey: canCreateReplacement ? undefined : resumedLog.idempotencyKey, error: errorMessage };
+                    setResults([{ id: resumedLog.id, status: "failed", error: errorMessage }]);
+                    setPreviewLog(failedLog);
+                    await saveLog(failedLog);
+                    message.error(errorMessage);
+                    setRunning(false);
+                });
+            return;
+        }
         void generate();
     };
 
@@ -350,36 +394,41 @@ export default function VideoPage() {
         setStartedAt((value) => value || performance.now());
         setResults((value) => (value.length ? value : [{ id: log.id, status: "pending" }]));
         const taskConfig = buildVideoConfig({ ...effectiveConfig, ...log.config }, log.task.model || log.model);
+        let activeLog = log;
         try {
-            for (let attempt = 0; attempt < 120; attempt += 1) {
-                const state = await pollVideoGenerationTask(configOverride || taskConfig, log.task);
-                if (state.status === "completed") {
-                    const stored = await storeGeneratedVideo(state.result);
-                    const nextVideo: GeneratedVideo = {
-                        id: nanoid(),
-                        url: stored.url,
-                        storageKey: stored.storageKey,
-                        durationMs: Date.now() - log.createdAt,
-                        width: stored.width || 1280,
-                        height: stored.height || 720,
-                        bytes: stored.bytes,
-                        mimeType: stored.mimeType,
-                    };
-                    setResults([{ id: nextVideo.id, status: "success", video: nextVideo }]);
-                    if (agentTaskId) updateAgentTask(agentTaskId, { status: "succeeded", successCount: 1, failCount: 0, error: undefined });
-                    await saveLog({ ...log, status: "success", durationMs: nextVideo.durationMs, video: nextVideo, error: undefined });
-                    message.success(t("videoWorkbench.generated"));
-                    return;
-                }
-                if (state.status === "failed") throw new Error(state.error);
-                if (attempt === 119) throw new Error(t("videoWorkbench.timeout"));
-                await delay(log.task.provider === "seedance" ? 5000 : 2500);
-            }
+            const result = await waitForVideoGenerationTask(configOverride || taskConfig, log.task, {
+                onTaskChange: async (task) => {
+                    activeLog = { ...activeLog, task };
+                    await logStore.setItem(activeLog.id, serializeLog(activeLog));
+                    setLogs((current) => current.map((item) => (item.id === activeLog.id ? activeLog : item)));
+                    setPreviewLog((current) => (current?.id === activeLog.id ? activeLog : current));
+                },
+            });
+            const stored = await storeGeneratedVideo(result);
+            const nextVideo: GeneratedVideo = {
+                id: nanoid(),
+                url: stored.url,
+                storageKey: stored.storageKey,
+                durationMs: Date.now() - log.createdAt,
+                width: stored.width || 1280,
+                height: stored.height || 720,
+                bytes: stored.bytes,
+                mimeType: stored.mimeType,
+            };
+            setResults([{ id: nextVideo.id, status: "success", video: nextVideo }]);
+            if (agentTaskId) updateAgentTask(agentTaskId, { status: "succeeded", successCount: 1, failCount: 0, error: undefined });
+            await saveLog({ ...activeLog, status: "success", durationMs: nextVideo.durationMs, video: nextVideo, error: undefined });
+            message.success(t("videoWorkbench.generated"));
         } catch (error) {
             const errorMessage = error instanceof Error ? error.message : t("workbench.generationFailed");
             setResults([{ id: log.id, status: "failed", error: errorMessage }]);
-            if (agentTaskId) updateAgentTask(agentTaskId, { status: "failed", successCount: 0, failCount: 1, error: errorMessage });
-            await saveLog({ ...log, status: "failed", durationMs: Date.now() - log.createdAt, error: errorMessage });
+            const canCreateReplacement = error instanceof VideoGenerationTerminalError && error.canCreateReplacement;
+            const pollingPaused = error instanceof VideoGenerationPollingPausedError;
+            const canResumeTask = Boolean(activeLog.task) && !canCreateReplacement;
+            if (agentTaskId) updateAgentTask(agentTaskId, { status: pollingPaused ? "running" : "failed", successCount: 0, failCount: pollingPaused ? 0 : 1, error: errorMessage });
+            const failedLog = { ...activeLog, status: canResumeTask ? ("pending" as const) : ("failed" as const), durationMs: Date.now() - log.createdAt, task: canCreateReplacement ? undefined : activeLog.task, error: errorMessage };
+            setPreviewLog(failedLog);
+            await saveLog(failedLog);
             message.error(errorMessage);
         } finally {
             activeLogIdsRef.current.delete(log.id);
@@ -403,6 +452,7 @@ export default function VideoPage() {
         if (log.config.videoSeconds) updateConfig("videoSeconds", log.config.videoSeconds);
         if (log.config.videoGenerateAudio) updateConfig("videoGenerateAudio", log.config.videoGenerateAudio);
         if (log.config.videoWatermark) updateConfig("videoWatermark", log.config.videoWatermark);
+        if (log.config.videoReferenceMode) updateConfig("videoReferenceMode", log.config.videoReferenceMode);
         setResults(log.status === "pending" ? [{ id: log.id, status: "pending" }] : log.video ? [{ id: log.video.id, status: "success", video: log.video }] : [{ id: log.id, status: "failed", error: log.error || t("workbench.generationFailed") }]);
     };
 
@@ -878,10 +928,11 @@ function normalizeLogConfig(log: Partial<GenerationLog>): GenerationLogConfig {
         videoSeconds: log.config?.videoSeconds || log.seconds || "",
         videoGenerateAudio: log.config?.videoGenerateAudio || "true",
         videoWatermark: log.config?.videoWatermark || "false",
+        videoReferenceMode: log.config?.videoReferenceMode || "auto",
     };
 }
 
-function buildLog({ prompt, model, config, references, videoReferences, audioReferences, durationMs, status, task, video, error }: { prompt: string; model: string; config: AiConfig; references: ReferenceImage[]; videoReferences: ReferenceVideo[]; audioReferences: ReferenceAudio[]; durationMs: number; status: GenerationLog["status"]; task?: VideoGenerationTask; video?: GeneratedVideo; error?: string }): GenerationLog {
+function buildLog({ prompt, model, config, references, videoReferences, audioReferences, durationMs, status, idempotencyKey, task, video, error }: { prompt: string; model: string; config: AiConfig; references: ReferenceImage[]; videoReferences: ReferenceVideo[]; audioReferences: ReferenceAudio[]; durationMs: number; status: GenerationLog["status"]; idempotencyKey?: string; task?: VideoGenerationTask; video?: GeneratedVideo; error?: string }): GenerationLog {
     const logConfig = {
         model: config.model,
         videoModel: config.videoModel,
@@ -890,6 +941,7 @@ function buildLog({ prompt, model, config, references, videoReferences, audioRef
         videoSeconds: config.videoSeconds,
         videoGenerateAudio: config.videoGenerateAudio,
         videoWatermark: config.videoWatermark,
+        videoReferenceMode: config.videoReferenceMode,
     };
     return {
         id: nanoid(),
@@ -907,6 +959,7 @@ function buildLog({ prompt, model, config, references, videoReferences, audioRef
         resolution: logConfig.vquality,
         seconds: logConfig.videoSeconds,
         status,
+        idempotencyKey,
         task,
         video,
         error,
@@ -924,6 +977,7 @@ function buildVideoConfig(config: AiConfig, model: string): AiConfig {
         vquality: normalizeResolution(config.vquality),
         videoGenerateAudio: String(boolConfig(config.videoGenerateAudio, true)),
         videoWatermark: String(boolConfig(config.videoWatermark, false)),
+        videoReferenceMode: config.videoReferenceMode === "frames" ? "frames" : "auto",
     };
 }
 
@@ -939,8 +993,4 @@ function normalizeVideoSize(value: string) {
 
 function normalizeResolution(value: string) {
     return normalizeVideoResolutionValue(value);
-}
-
-function delay(ms: number) {
-    return new Promise((resolve) => setTimeout(resolve, ms));
 }

@@ -4,7 +4,7 @@ import { useTranslation } from "react-i18next";
 
 import i18n from "@/i18n";
 import { ImageSettingsTheme } from "@/components/image-settings-panel";
-import { boolConfig, isSeedanceVideoConfig, normalizeSeedanceDuration, normalizeSeedanceRatio, normalizeSeedanceResolution, seedanceDurationOptions, seedancePixelLabel, seedanceRatioOptions, seedanceResolutionOptions } from "@/lib/seedance-video";
+import { boolConfig, isSeedanceVideoConfig, normalizeSeedanceDuration, normalizeSeedanceRatio, normalizeSeedanceResolution, normalizeVideoReferenceMode, seedanceDurationOptions, seedancePixelLabel, seedanceRatioOptions, seedanceResolutionOptions, supportsVideoFrameMode } from "@/lib/seedance-video";
 import { type CanvasTheme } from "@/lib/canvas-theme";
 import { type AiConfig } from "@/stores/use-config-store";
 
@@ -31,7 +31,7 @@ export const videoSecondOptions = secondOptions.map((value) => String(value));
 
 type VideoSettingsPanelProps = {
     config: AiConfig;
-    onConfigChange: (key: "vquality" | "size" | "videoSeconds" | "videoGenerateAudio" | "videoWatermark", value: string) => void;
+    onConfigChange: (key: "vquality" | "size" | "videoSeconds" | "videoGenerateAudio" | "videoWatermark" | "videoReferenceMode", value: string) => void;
     theme: CanvasTheme;
     showTitle?: boolean;
     className?: string;
@@ -115,6 +115,8 @@ function SeedanceVideoSettingsPanel({ config, onConfigChange, theme, showTitle, 
     const duration = normalizeSeedanceDuration(config.videoSeconds);
     const generateAudio = boolConfig(config.videoGenerateAudio, true);
     const watermark = boolConfig(config.videoWatermark, false);
+    const referenceMode = normalizeVideoReferenceMode(config.videoReferenceMode);
+    const frameMode = supportsVideoFrameMode(config.model || config.videoModel);
 
     return (
         <ImageSettingsTheme theme={theme}>
@@ -163,6 +165,14 @@ function SeedanceVideoSettingsPanel({ config, onConfigChange, theme, showTitle, 
                         <SwitchRow label={t("settingsPanels.video.watermark")} checked={watermark} theme={theme} onChange={(checked) => onConfigChange("videoWatermark", String(checked))} />
                     </div>
                 </SettingGroup>
+                {frameMode ? (
+                    <SettingGroup title={t("settingsPanels.video.referenceMode")} color={theme.node.muted}>
+                        <div className="grid grid-cols-2 gap-2.5">
+                            <OptionPill selected={referenceMode === "auto"} theme={theme} onClick={() => onConfigChange("videoReferenceMode", "auto")}>{t("settingsPanels.video.referenceModes.auto")}</OptionPill>
+                            <OptionPill selected={referenceMode === "frames"} theme={theme} onClick={() => onConfigChange("videoReferenceMode", "frames")}>{t("settingsPanels.video.referenceModes.frames")}</OptionPill>
+                        </div>
+                    </SettingGroup>
+                ) : null}
             </div>
         </ImageSettingsTheme>
     );

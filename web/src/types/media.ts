@@ -27,7 +27,7 @@ export type VideoGenerationResult = {
 
 export type VideoGenerationTask = {
     id: string;
-    provider: "openai" | "seedance";
+    provider: "openai" | "seedance" | "plugin";
     model: string;
     baseUrl?: string;
     statusPathBase?: string;

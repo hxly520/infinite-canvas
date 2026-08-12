@@ -6,6 +6,7 @@ import { normalizePluginImages, runModelPlugin } from "./model-plugin";
 import { nanoid } from "nanoid";
 import { dataUrlToFile } from "@/lib/image-utils";
 import { buildImageReferencePromptText } from "@/lib/image-reference-prompt";
+import { fixedImageTier } from "@/lib/image-model";
 import { imageToDataUrl } from "@/services/image-storage";
 import type { ReferenceImage } from "@/types/image";
 
@@ -71,10 +72,23 @@ type ResponseApiPayload = {
 type ResponseStreamState = { buffer: string; text: string; payload?: ResponseApiPayload; error?: string };
 
 type ImageApiResponse = {
-    data?: Array<Record<string, unknown>>;
+    data?: unknown[];
+    images?: unknown[];
+    output?: unknown[];
+    results?: unknown[];
+    result?: unknown;
+    response?: unknown;
     error?: { message?: string };
     code?: number;
     msg?: string;
+};
+type ImageTaskResponse = ImageApiResponse & {
+    id?: string;
+    task_id?: string;
+    taskId?: string;
+    status?: string;
+    result?: ImageApiResponse;
+    response?: ImageApiResponse;
 };
 type GeminiPart = {
     text?: string;
@@ -95,6 +109,7 @@ type GeminiPayload = {
 };
 type GeminiStreamState = { buffer: string; text: string; toolCalls: ResponseToolCall[]; error?: string };
 type RequestOptions = { signal?: AbortSignal };
+type OpenAIImageTaskEndpoint = "generations" | "edits";
 
 const QUALITY_BASE: Record<string, number> = {
     low: 1024,
@@ -115,6 +130,11 @@ const IMAGE_MAX_PIXELS = 8294400;
 const IMAGE_MAX_EDGE = 3840;
 const IMAGE_MAX_RATIO = 3;
 const IMAGE_OUTPUT_FORMAT = "png";
+const DEFAULT_IMAGE_POLL_INTERVAL_MS = 2500;
+const DEFAULT_IMAGE_POLL_TIMEOUT_MS = 600000;
+const MANAGED_IMAGE_ORIGIN = "https://video.52token.org";
+const EDGE_IMAGE_PATH_PREFIX = "/v1/image-content/";
+const FIXED_IMAGE_RATIOS = ["1:1", "4:3", "3:4", "16:9", "9:16"] as const;
 
 const GEMINI_SUPPORTED_RATIOS = ["1:1", "1:4", "1:8", "2:3", "3:2", "3:4", "4:1", "4:3", "4:5", "5:4", "8:1", "9:16", "16:9", "21:9"];
 const GEMINI_IMAGE_SIZE_BY_QUALITY: Record<string, string> = { low: "1K", medium: "2K", high: "4K", standard: "1K", hd: "2K" };
@@ -233,30 +253,70 @@ function supportsGeminiImageSize(model: string) {
     return value.includes("gemini-3") || value.includes("3.1") || value.includes("3-pro");
 }
 
-function resolveImageDataUrl(item: Record<string, unknown>) {
-    if (typeof item.b64_json === "string" && item.b64_json) {
-        return `data:image/png;base64,${item.b64_json}`;
+function resolveImageDataUrl(item: unknown) {
+    if (typeof item === "string") return normalizeImageResultString(item);
+    if (!item || typeof item !== "object" || Array.isArray(item)) return null;
+    const record = item as Record<string, unknown>;
+    const base64 = firstString(record, ["b64_json", "base64", "image_base64"]);
+    if (base64) {
+        const format = firstString(record, ["mime_type", "content_type", "output_format"]).toLowerCase();
+        const mimeType = format.startsWith("image/") ? format : format === "jpeg" || format === "jpg" ? "image/jpeg" : format === "webp" ? "image/webp" : "image/png";
+        return base64.startsWith("data:image/") ? base64 : `data:${mimeType};base64,${base64}`;
     }
-    if (typeof item.url === "string" && item.url) {
-        return item.url;
-    }
+    const url = firstString(record, ["url", "image_url", "download_url", "result_url", "output_url", "media_url"]);
+    if (url) return normalizeImageResultString(url);
     return null;
 }
 
-function parseImagePayload(payload: ImageApiResponse) {
+function normalizeImageResultString(value: string) {
+    const trimmed = value.trim();
+    if (!trimmed) return null;
+    if (trimmed.startsWith("data:image/") || trimmed.startsWith("/") || /^https?:\/\//i.test(trimmed)) return trimmed;
+    if (/^[A-Za-z0-9+/_=-]+$/.test(trimmed) && trimmed.length > 128) return `data:image/png;base64,${trimmed}`;
+    return null;
+}
+
+function firstString(record: Record<string, unknown>, keys: string[]) {
+    for (const key of keys) {
+        const value = record[key];
+        if (typeof value === "string" && value.trim()) return value.trim();
+    }
+    return "";
+}
+
+function imagePayloadItems(payload: ImageApiResponse, depth = 0): unknown[] {
+    if (!payload || typeof payload !== "object" || depth > 2) return [];
+    const items = [payload.data, payload.images, payload.output, payload.results].flatMap((value) => (Array.isArray(value) ? value : []));
+    for (const wrapper of [payload.result, payload.response]) {
+        if (Array.isArray(wrapper)) items.push(...wrapper);
+        else if (wrapper && typeof wrapper === "object") items.push(...imagePayloadItems(wrapper as ImageApiResponse, depth + 1));
+    }
+    return items;
+}
+
+function resolveManagedImageUrl(value: string, config: AiConfig) {
+    const raw = value.trim();
+    if (raw.startsWith("data:image/")) return raw;
+    if (!raw || raw.startsWith("//")) throw new Error("图片接口返回了无效媒体地址");
+    try {
+        const gateway = new URL(config.baseUrl.trim());
+        const target = raw.startsWith("/") ? new URL(raw, raw.startsWith(EDGE_IMAGE_PATH_PREFIX) ? MANAGED_IMAGE_ORIGIN : gateway.origin) : new URL(raw);
+        if (target.origin === MANAGED_IMAGE_ORIGIN && target.pathname.startsWith(EDGE_IMAGE_PATH_PREFIX)) return target.toString();
+    } catch {
+        // Fall through to a user-safe media policy error.
+    }
+    throw new Error("图片接口返回了外部媒体地址，请通过支持媒体代理的中转站端点调用");
+}
+
+function parseImagePayload(payload: ImageApiResponse, config: AiConfig) {
     if (typeof payload.code === "number" && payload.code !== 0) {
         throw new Error(payload.msg || apiText("requestFailed"));
     }
-    // Support data, images, and results response fields used by different APIs.
-    const imageList = payload.data
-        || (payload as Record<string, unknown>).images as Array<Record<string, unknown>> | undefined
-        || (payload as Record<string, unknown>).results as Array<Record<string, unknown>> | undefined
-        || [];
-    const images =
-        imageList
-            .map(resolveImageDataUrl)
-            .filter((value): value is string => Boolean(value))
-            .map((dataUrl) => ({ id: nanoid(), dataUrl }));
+    if (payload.error?.message) throw new Error(payload.error.message);
+    const images = imagePayloadItems(payload)
+        .map(resolveImageDataUrl)
+        .filter((value): value is string => Boolean(value))
+        .map((dataUrl) => ({ id: nanoid(), dataUrl: resolveManagedImageUrl(dataUrl, config) }));
 
     if (images.length === 0) {
         // Check whether the response contains data in an unrecognized format.
@@ -267,6 +327,77 @@ function parseImagePayload(payload: ImageApiResponse) {
     }
 
     return images;
+}
+
+function imagePayloadHasImages(payload: ImageApiResponse) {
+    return imagePayloadItems(payload).some((item) => Boolean(resolveImageDataUrl(item)));
+}
+
+function resolveTaskPayload(payload: ImageTaskResponse) {
+    if (payload.result && imagePayloadHasImages(payload.result)) return payload.result;
+    if (payload.response && imagePayloadHasImages(payload.response)) return payload.response;
+    return payload;
+}
+
+function imageTaskId(payload: ImageTaskResponse) {
+    return stringValue(payload.id) || stringValue(payload.task_id) || stringValue(payload.taskId);
+}
+
+function imageTaskStatus(payload: ImageTaskResponse) {
+    return String(payload.status || "").trim().toLowerCase();
+}
+
+async function parseCreatedImageTask(config: AiConfig, payload: ImageTaskResponse, endpoint: OpenAIImageTaskEndpoint, options?: RequestOptions) {
+    const result = resolveTaskPayload(payload);
+    if (imagePayloadHasImages(result)) return parseImagePayload(result, config);
+    const taskId = imageTaskId(payload);
+    if (!taskId) return parseImagePayload(result, config);
+    return pollImageTask(config, endpoint, taskId, options);
+}
+
+async function pollImageTask(config: AiConfig, endpoint: OpenAIImageTaskEndpoint, taskId: string, options?: RequestOptions) {
+    const interval = boundedNumber(config.imagePollIntervalMs, DEFAULT_IMAGE_POLL_INTERVAL_MS, 1000, 30000);
+    const deadline = Date.now() + boundedNumber(config.imagePollTimeoutMs, DEFAULT_IMAGE_POLL_TIMEOUT_MS, 10000, 1800000);
+    while (Date.now() <= deadline) {
+        if (options?.signal?.aborted) throw new DOMException("Aborted", "AbortError");
+        const payload = (await axios.get<ImageTaskResponse>(aiApiUrl(config, `/images/${endpoint}/${encodeURIComponent(taskId)}`), { headers: aiHeaders(config), signal: options?.signal })).data;
+        const result = resolveTaskPayload(payload);
+        if (imagePayloadHasImages(result)) return parseImagePayload(result, config);
+        const status = imageTaskStatus(payload);
+        if (["failed", "error", "cancelled", "canceled", "expired"].includes(status)) throw new Error(payload.msg || payload.error?.message || `异步生图任务失败（${status}）`);
+        await delay(interval, options?.signal);
+    }
+    throw new Error("异步生图任务轮询超时");
+}
+
+function boundedNumber(value: string | undefined, fallback: number, min: number, max: number) {
+    const number = Math.floor(Number(value));
+    return Number.isFinite(number) ? Math.max(min, Math.min(max, number)) : fallback;
+}
+
+function imageResponseFormat(config: AiConfig) {
+    return config.imageResponseFormat === "url" ? "url" : "b64_json";
+}
+
+function fixedImageAspectRatio(size: string) {
+    const value = size.trim().toLowerCase();
+    if (!value || value === "auto") return undefined;
+    if ((FIXED_IMAGE_RATIOS as readonly string[]).includes(value)) return value;
+    const dimensions = parseImageDimensions(value);
+    if (!dimensions) throw new Error("当前固定档位模型仅支持 1:1、4:3、3:4、16:9 或 9:16 画幅");
+    const ratio = dimensions.width / dimensions.height;
+    return FIXED_IMAGE_RATIOS.find((candidate) => {
+        const [width, height] = candidate.split(":").map(Number);
+        return Math.abs(ratio - width / height) < 0.02;
+    }) || (() => { throw new Error("当前固定档位模型仅支持 1:1、4:3、3:4、16:9 或 9:16 画幅"); })();
+}
+
+function delay(ms: number, signal?: AbortSignal) {
+    return new Promise<void>((resolve, reject) => {
+        if (signal?.aborted) return reject(new DOMException("Aborted", "AbortError"));
+        const timer = setTimeout(resolve, ms);
+        signal?.addEventListener("abort", () => { clearTimeout(timer); reject(new DOMException("Aborted", "AbortError")); }, { once: true });
+    });
 }
 
 function readApiErrorMessage(value: unknown): string {
@@ -715,7 +846,8 @@ function parseGeminiImagePayload(payload: GeminiPayload) {
 
 export async function requestGeneration(config: AiConfig, prompt: string, options?: RequestOptions) {
     const requestConfig = resolveModelRequestConfig(config, config.model || config.imageModel);
-    const n = Math.max(1, Math.min(15, Math.floor(Math.abs(Number(config.count)) || 1)));
+    const fixedTier = fixedImageTier(requestConfig.model);
+    const n = fixedTier ? 1 : Math.max(1, Math.min(15, Math.floor(Math.abs(Number(config.count)) || 1)));
     const script = resolveModelScript(config, config.model || config.imageModel);
     if (script) {
         const quality = normalizeQuality(config.quality);
@@ -744,28 +876,31 @@ export async function requestGeneration(config: AiConfig, prompt: string, option
         }
     }
     const quality = normalizeQuality(config.quality);
-    const requestSize = resolveRequestSize(quality, config.size);
+    const requestSize = fixedTier ? undefined : resolveRequestSize(quality, config.size);
     const background = normalizeBackground(config.background);
+    const responseFormat = fixedTier ? "url" : imageResponseFormat(requestConfig);
+    const asyncMode = requestConfig.imageDispatchMode === "async";
     try {
-        const response = await axios.post<ImageApiResponse>(
+        const response = await axios.post<ImageTaskResponse>(
             aiApiUrl(requestConfig, "/images/generations"),
             {
                 model: requestConfig.model,
                 prompt: withSystemPrompt(requestConfig, prompt),
                 n,
-                ...(quality ? { quality } : {}),
+                ...(asyncMode ? { async: true } : {}),
+                ...(fixedTier ? { image_size: fixedTier, aspect_ratio: fixedImageAspectRatio(config.size) } : {}),
+                ...(!fixedTier && quality ? { quality } : {}),
                 ...(requestSize ? { size: requestSize } : {}),
                 ...(background ? { background } : {}),
-                response_format: "b64_json",
-                output_format: IMAGE_OUTPUT_FORMAT,
+                response_format: responseFormat,
+                ...(responseFormat === "b64_json" ? { output_format: IMAGE_OUTPUT_FORMAT } : {}),
             },
             {
-                headers: aiHeaders(requestConfig, "application/json"),
+                headers: { ...aiHeaders(requestConfig, "application/json"), ...(asyncMode ? { "Idempotency-Key": `image-${nanoid()}` } : {}) },
                 signal: options?.signal,
             },
         );
-        const images = parseImagePayload(response.data);
-        return images;
+        return await parseCreatedImageTask(requestConfig, response.data, "generations", options);
     } catch (error) {
         throw new Error(readAxiosError(error, apiText("requestFailed")));
     }
@@ -773,7 +908,8 @@ export async function requestGeneration(config: AiConfig, prompt: string, option
 
 export async function requestEdit(config: AiConfig, prompt: string, references: ReferenceImage[], mask?: ReferenceImage, options?: RequestOptions) {
     const requestConfig = resolveModelRequestConfig(config, config.model || config.imageModel);
-    const n = Math.max(1, Math.min(15, Math.floor(Math.abs(Number(config.count)) || 1)));
+    const fixedTier = fixedImageTier(requestConfig.model);
+    const n = fixedTier ? 1 : Math.max(1, Math.min(15, Math.floor(Math.abs(Number(config.count)) || 1)));
     const requestPrompt = buildImageReferencePromptText(prompt, references);
     const script = resolveModelScript(config, config.model || config.imageModel);
     if (script) {
@@ -818,8 +954,8 @@ export async function requestEdit(config: AiConfig, prompt: string, references: 
                     model: requestConfig.model,
                     prompt: withSystemPrompt(requestConfig, requestPrompt),
                     n,
-                    response_format: "b64_json",
-                    output_format: IMAGE_OUTPUT_FORMAT,
+                    response_format: imageResponseFormat(requestConfig),
+                    ...(imageResponseFormat(requestConfig) === "b64_json" ? { output_format: IMAGE_OUTPUT_FORMAT } : {}),
                     image: refs,
                     ...(quality ? { quality } : {}),
                     ...(requestSize ? { size: requestSize } : {}),
@@ -830,21 +966,31 @@ export async function requestEdit(config: AiConfig, prompt: string, references: 
                     signal: options?.signal,
                 },
             );
-            return parseImagePayload(response.data);
+            return parseImagePayload(response.data, requestConfig);
         } catch (error) {
             throw new Error(readAxiosError(error, apiText("requestFailed")));
         }
     }
 
-    const quality = normalizeQuality(config.quality);
-    const requestSize = resolveRequestSize(quality, config.size);
+    const quality = fixedTier ? undefined : normalizeQuality(config.quality);
+    const requestSize = fixedTier ? undefined : resolveRequestSize(quality, config.size);
     const background = normalizeBackground(config.background);
     const formData = new FormData();
     formData.set("model", requestConfig.model);
     formData.set("prompt", withSystemPrompt(requestConfig, requestPrompt));
     formData.set("n", String(n));
-    formData.set("response_format", "b64_json");
-    formData.set("output_format", IMAGE_OUTPUT_FORMAT);
+    const responseFormat = fixedTier ? "url" : imageResponseFormat(requestConfig);
+    formData.set("response_format", responseFormat);
+    if (responseFormat === "b64_json") formData.set("output_format", IMAGE_OUTPUT_FORMAT);
+    if (fixedTier) {
+        formData.set("image_size", fixedTier);
+        formData.set("stream", "false");
+        formData.set("output_format", IMAGE_OUTPUT_FORMAT);
+        const aspectRatio = fixedImageAspectRatio(config.size);
+        if (aspectRatio) formData.set("aspect_ratio", aspectRatio);
+    }
+    const asyncMode = requestConfig.imageDispatchMode === "async";
+    if (asyncMode) formData.set("async", "true");
     if (quality) {
         formData.set("quality", quality);
     }
@@ -859,9 +1005,8 @@ export async function requestEdit(config: AiConfig, prompt: string, references: 
     if (mask) formData.set("mask", dataUrlToFile(mask));
 
     try {
-        const response = await axios.post<ImageApiResponse>(aiApiUrl(requestConfig, "/images/edits"), formData, { headers: aiHeaders(requestConfig), signal: options?.signal });
-        const images = parseImagePayload(response.data);
-        return images;
+        const response = await axios.post<ImageTaskResponse>(aiApiUrl(requestConfig, "/images/edits"), formData, { headers: { ...aiHeaders(requestConfig), ...(asyncMode ? { "Idempotency-Key": `image-edit-${nanoid()}` } : {}) }, signal: options?.signal });
+        return await parseCreatedImageTask(requestConfig, response.data, "edits", options);
     } catch (error) {
         throw new Error(readAxiosError(error, apiText("requestFailed")));
     }
