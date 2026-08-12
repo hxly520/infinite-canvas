@@ -2,7 +2,12 @@ name: Docs Docker image
 
 on:
   push:
-    tags: ["v*"]
+    # Private compatibility tags publish only the application image.  Keep
+    # the documentation image on official release tags to avoid publishing
+    # docs for every private `-52t.*` compatibility build.
+    tags:
+      - "v*"
+      - "!v*-52t.*"
   workflow_dispatch:
 
 permissions:

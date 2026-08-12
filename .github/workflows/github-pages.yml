@@ -2,7 +2,11 @@ name: GitHub Pages
 
 on:
   push:
-    tags: ["v*"]
+    # Pages are an official release artifact, not part of private
+    # compatibility-tag builds.
+    tags:
+      - "v*"
+      - "!v*-52t.*"
   workflow_dispatch:
 
 permissions:

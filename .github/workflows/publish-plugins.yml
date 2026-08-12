@@ -5,7 +5,11 @@ name: Publish Official Plugins
 # 前端经 jsDelivr 从该分支远程拉取;构建产物不进 main、不进 git。
 on:
   push:
-    tags: ["v*"]
+    # Publish the official plugin registry only for official release tags.
+    # Private `-52t.*` tags must not overwrite the shared plugins-dist branch.
+    tags:
+      - "v*"
+      - "!v*-52t.*"
   workflow_dispatch:
 
 permissions:
