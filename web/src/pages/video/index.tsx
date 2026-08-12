@@ -1,9 +1,10 @@
-import { ArrowLeft, ArrowRight, BookOpen, CheckSquare, ClipboardPaste, Download, FolderPlus, History, Link2, LoaderCircle, Music2, Plus, SlidersHorizontal, Sparkles, Trash2, Upload, VideoIcon } from "lucide-react";
-import { useEffect, useRef, useState } from "react";
+import { ArrowLeft, ArrowRight, BookOpen, CheckSquare, ClipboardPaste, Download, FolderPlus, History, LoaderCircle, Music2, Plus, SlidersHorizontal, Sparkles, Trash2, Upload, VideoIcon } from "lucide-react";
+import { useEffect, useRef, useState, type DragEvent } from "react";
 import { App, Button, Checkbox, Drawer, Empty, Input, Modal, Tag, Typography } from "antd";
 import localforage from "localforage";
 import { nanoid } from "nanoid";
 import { saveAs } from "file-saver";
+import { useTranslation } from "react-i18next";
 
 import { AssetPickerModal, type InsertAssetPayload } from "@/components/canvas/asset-picker-modal";
 import { ModelPicker } from "@/components/model-picker";
@@ -11,27 +12,17 @@ import { PromptSelectDialog } from "@/components/prompts/prompt-select-dialog";
 import { VideoSettingsPanel, normalizeVideoResolutionValue, normalizeVideoSizeValue, videoSizeLabel } from "@/components/video-settings-panel";
 import { canvasThemes } from "@/lib/canvas-theme";
 import { formatBytes, formatDuration } from "@/lib/image-utils";
-import {
-    boolConfig,
-    isArkPlanBaseUrl,
-    isSeedanceVideoConfig,
-    isSeedanceVideoModel,
-    normalizeSeedanceRatio,
-    normalizeVideoReferenceMode,
-    seedanceReferenceLabel,
-    seedanceVideoReferenceError,
-    seedanceVideoReferenceHint,
-    SEEDANCE_REFERENCE_LIMITS,
-    supportsVideoFrameMode,
-} from "@/lib/seedance-video";
-import { resolveMediaUrl, uploadMediaFile } from "@/services/file-storage";
+import { boolConfig, isSeedanceVideoConfig, normalizeSeedanceRatio, seedanceReferenceLabel, seedanceVideoReferenceError, seedanceVideoReferenceHint, SEEDANCE_REFERENCE_LIMITS, SEEDANCE_VIDEO_MIME_TYPES } from "@/lib/seedance-video";
+import { deleteStoredMedia, resolveMediaUrl, uploadMediaFile } from "@/services/file-storage";
 import { resolveImageUrl, uploadImage } from "@/services/image-storage";
-import { createVideoGenerationIdempotencyKey, createVideoGenerationTask, storeGeneratedVideo, videoReferenceLimits, VideoGenerationTerminalError, waitForVideoGenerationTask, type VideoGenerationTask } from "@/services/api/video";
+import { createVideoGenerationTask, pollVideoGenerationTask, storeGeneratedVideo, type VideoGenerationTask } from "@/services/api/video";
 import { useAssetStore } from "@/stores/use-asset-store";
-import { modelMatchesCapability, modelOptionLabel, modelOptionName, resolveModelRequestConfig, useConfigStore, useEffectiveConfig, type AiConfig } from "@/stores/use-config-store";
+import { useWorkbenchAgentStore } from "@/stores/use-workbench-agent-store";
+import { modelOptionLabel, useConfigStore, useEffectiveConfig, type AiConfig } from "@/stores/use-config-store";
 import { useThemeStore } from "@/stores/use-theme-store";
 import type { ReferenceImage } from "@/types/image";
 import type { ReferenceAudio, ReferenceVideo } from "@/types/media";
+import i18n from "@/i18n";
 
 type GeneratedVideo = {
     id: string;
@@ -66,15 +57,13 @@ type GenerationLog = {
     size: string;
     resolution: string;
     seconds: string;
-    status: "生成中" | "待查询" | "成功" | "失败";
-    idempotencyKey?: string;
+    status: "pending" | "success" | "failed";
     task?: VideoGenerationTask;
     video?: GeneratedVideo;
     error?: string;
 };
 
-type GenerationLogConfig = Pick<AiConfig, "model" | "videoModel" | "size" | "vquality" | "videoSeconds" | "videoGenerateAudio" | "videoWatermark" | "videoReferenceMode">;
-type ReferenceMediaKind = "image" | "video" | "audio";
+type GenerationLogConfig = Pick<AiConfig, "model" | "videoModel" | "size" | "vquality" | "videoSeconds" | "videoGenerateAudio" | "videoWatermark">;
 
 type UpdateAiConfig = <K extends keyof AiConfig>(key: K, value: AiConfig[K]) => void;
 
@@ -83,7 +72,9 @@ const logStore = localforage.createInstance({ name: "infinite-canvas", storeName
 
 export default function VideoPage() {
     const { message } = App.useApp();
+    const { t } = useTranslation();
     const fileInputRef = useRef<HTMLInputElement>(null);
+    const dragDepthRef = useRef(0);
     const activeLogIdsRef = useRef<Set<string>>(new Set());
     const config = useConfigStore((state) => state.config);
     const effectiveConfig = useEffectiveConfig();
@@ -91,7 +82,6 @@ export default function VideoPage() {
     const isAiConfigReady = useConfigStore((state) => state.isAiConfigReady);
     const openConfigDialog = useConfigStore((state) => state.openConfigDialog);
     const addAsset = useAssetStore((state) => state.addAsset);
-    const cleanupAssets = useAssetStore((state) => state.cleanupImages);
     const [prompt, setPrompt] = useState("");
     const [references, setReferences] = useState<ReferenceImage[]>([]);
     const [videoReferences, setVideoReferences] = useState<ReferenceVideo[]>([]);
@@ -108,16 +98,15 @@ export default function VideoPage() {
     const [selectedLogIds, setSelectedLogIds] = useState<string[]>([]);
     const [previewLog, setPreviewLog] = useState<GenerationLog | null>(null);
     const [deleteConfirmOpen, setDeleteConfirmOpen] = useState(false);
-    const uploadKindRef = useRef<ReferenceMediaKind>("image");
-    const [referenceLinkKind, setReferenceLinkKind] = useState<"video" | "audio" | null>(null);
-    const [referenceLinkValue, setReferenceLinkValue] = useState("");
+    const [referenceDragTarget, setReferenceDragTarget] = useState<"image" | "video" | "audio" | null>(null);
+    const [autoRunToken, setAutoRunToken] = useState(0);
+    const videoCommand = useWorkbenchAgentStore((state) => state.videoCommand);
+    const clearVideoCommand = useWorkbenchAgentStore((state) => state.clearVideoCommand);
+    const updateAgentTask = useWorkbenchAgentStore((state) => state.updateTask);
+    const processedCommandRef = useRef(0);
+    const agentTaskIdRef = useRef<string | undefined>(undefined);
 
-    const model = [effectiveConfig.videoModel, effectiveConfig.model].find((value) => value && modelMatchesCapability(value, "video")) || "";
-    const selectedVideoConfig = resolveModelRequestConfig(effectiveConfig, model);
-    const referenceMode = normalizeVideoReferenceMode(selectedVideoConfig.videoReferenceMode);
-    const firstLastFrameMode = referenceMode === "frames" && !isArkPlanBaseUrl(selectedVideoConfig.baseUrl) && supportsVideoFrameMode(model);
-    const referenceLimits = isArkPlanBaseUrl(selectedVideoConfig.baseUrl) ? { images: SEEDANCE_REFERENCE_LIMITS.images, videos: SEEDANCE_REFERENCE_LIMITS.videos, audios: SEEDANCE_REFERENCE_LIMITS.audios } : videoReferenceLimits(model, referenceMode);
-    const remoteReferenceMediaOnly = !isArkPlanBaseUrl(selectedVideoConfig.baseUrl) && /(?:seedance|grok)/i.test(modelOptionName(model));
+    const model = effectiveConfig.videoModel || effectiveConfig.model;
     const canGenerate = Boolean(prompt.trim());
 
     useEffect(() => {
@@ -130,25 +119,16 @@ export default function VideoPage() {
         void refreshLogs();
     }, []);
 
-    const openReferenceUpload = (kind: ReferenceMediaKind) => {
-        uploadKindRef.current = kind;
-        if (fileInputRef.current) {
-            fileInputRef.current.accept = kind === "image" ? "image/*" : kind === "video" ? "video/mp4,video/quicktime" : "audio/mpeg,audio/wav,audio/x-wav,.mp3,.wav";
-            fileInputRef.current.click();
-        }
-    };
-
     const addReferences = async (files?: FileList | null) => {
         const selectedFiles = Array.from(files || []);
-        const kind = uploadKindRef.current;
-        const matchesKind = (file: File) => (kind === "image" ? file.type.startsWith("image/") : kind === "video" ? file.type.startsWith("video/") : isSupportedAudioFile(file));
-        if (selectedFiles.some((file) => !matchesKind(file))) message.warning("已忽略与当前参考类型不一致的文件");
-        const imageFiles = kind === "image" ? selectedFiles.filter((file) => file.type.startsWith("image/") && file.size <= SEEDANCE_REFERENCE_LIMITS.imageMaxBytes).slice(0, Math.max(0, referenceLimits.images - references.length)) : [];
-        const videoFiles = kind === "video" ? selectedFiles.filter((file) => file.type.startsWith("video/") && file.size <= SEEDANCE_REFERENCE_LIMITS.videoMaxBytes).slice(0, Math.max(0, referenceLimits.videos - videoReferences.length)) : [];
-        const audioFiles = kind === "audio" ? selectedFiles.filter((file) => isSupportedAudioFile(file) && file.size <= SEEDANCE_REFERENCE_LIMITS.audioMaxBytes).slice(0, Math.max(0, referenceLimits.audios - audioReferences.length)) : [];
-        if (selectedFiles.some((file) => file.type.startsWith("image/") && file.size > SEEDANCE_REFERENCE_LIMITS.imageMaxBytes)) message.warning("已忽略超过 30MB 的参考图");
-        if (selectedFiles.some((file) => file.type.startsWith("video/") && file.size > SEEDANCE_REFERENCE_LIMITS.videoMaxBytes)) message.warning("已忽略超过 50MB 的参考视频");
-        if (selectedFiles.some((file) => isSupportedAudioFile(file) && file.size > SEEDANCE_REFERENCE_LIMITS.audioMaxBytes)) message.warning("已忽略超过 15MB 的参考音频");
+        const unsupported = selectedFiles.filter((file) => !file.type.startsWith("image/") && !SEEDANCE_VIDEO_MIME_TYPES.includes(file.type) && !isSupportedAudioFile(file));
+        if (unsupported.length) message.warning(t("videoWorkbench.unsupportedFiles"));
+        const imageFiles = selectedFiles.filter((file) => file.type.startsWith("image/") && file.size <= SEEDANCE_REFERENCE_LIMITS.imageMaxBytes).slice(0, SEEDANCE_REFERENCE_LIMITS.images - references.length);
+        const videoFiles = selectedFiles.filter((file) => SEEDANCE_VIDEO_MIME_TYPES.includes(file.type) && file.size <= SEEDANCE_REFERENCE_LIMITS.videoMaxBytes).slice(0, SEEDANCE_REFERENCE_LIMITS.videos - videoReferences.length);
+        const audioFiles = selectedFiles.filter((file) => isSupportedAudioFile(file) && file.size <= SEEDANCE_REFERENCE_LIMITS.audioMaxBytes).slice(0, SEEDANCE_REFERENCE_LIMITS.audios - audioReferences.length);
+        if (selectedFiles.some((file) => file.type.startsWith("image/") && file.size > SEEDANCE_REFERENCE_LIMITS.imageMaxBytes)) message.warning(t("videoWorkbench.imageTooLarge"));
+        if (selectedFiles.some((file) => SEEDANCE_VIDEO_MIME_TYPES.includes(file.type) && file.size > SEEDANCE_REFERENCE_LIMITS.videoMaxBytes)) message.warning(t("videoWorkbench.videoTooLarge"));
+        if (selectedFiles.some((file) => isSupportedAudioFile(file) && file.size > SEEDANCE_REFERENCE_LIMITS.audioMaxBytes)) message.warning(t("videoWorkbench.audioTooLarge"));
         const nextReferences = await Promise.all(
             imageFiles.map(async (file) => {
                 const image = await uploadImage(file);
@@ -171,9 +151,28 @@ export default function VideoPage() {
             ),
             message.warning,
         );
-        setReferences((value) => [...value, ...nextReferences].slice(0, referenceLimits.images));
-        setVideoReferences((value) => [...value, ...nextVideoReferences].slice(0, referenceLimits.videos));
-        setAudioReferences((value) => [...value, ...nextAudioReferences].slice(0, referenceLimits.audios));
+        setReferences((value) => [...value, ...nextReferences].slice(0, SEEDANCE_REFERENCE_LIMITS.images));
+        setVideoReferences((value) => [...value, ...nextVideoReferences].slice(0, SEEDANCE_REFERENCE_LIMITS.videos));
+        setAudioReferences((value) => [...value, ...nextAudioReferences].slice(0, SEEDANCE_REFERENCE_LIMITS.audios));
+    };
+
+    const handleReferenceDragEnter = (event: DragEvent<HTMLDivElement>, target: "image" | "video" | "audio") => {
+        event.preventDefault();
+        dragDepthRef.current += 1;
+        if (event.dataTransfer.types.includes("Files")) setReferenceDragTarget(target);
+    };
+
+    const handleReferenceDragLeave = (event: DragEvent<HTMLDivElement>) => {
+        event.preventDefault();
+        dragDepthRef.current = Math.max(0, dragDepthRef.current - 1);
+        if (!dragDepthRef.current) setReferenceDragTarget(null);
+    };
+
+    const handleReferenceDrop = (event: DragEvent<HTMLDivElement>) => {
+        event.preventDefault();
+        dragDepthRef.current = 0;
+        setReferenceDragTarget(null);
+        void addReferences(event.dataTransfer.files);
     };
 
     const addReferencesFromClipboard = async () => {
@@ -181,175 +180,93 @@ export default function VideoPage() {
             const items = await navigator.clipboard.read();
             const blobs = await Promise.all(items.flatMap((item) => item.types.filter((type) => type.startsWith("image/")).map((type) => item.getType(type))));
             if (!blobs.length) {
-                message.error("剪切板里没有可读取的图片");
+                message.error(t("videoWorkbench.clipboardEmpty"));
                 return;
             }
             const nextReferences = await Promise.all(
-                blobs.slice(0, Math.max(0, referenceLimits.images - references.length)).map(async (blob, index) => {
+                blobs.slice(0, SEEDANCE_REFERENCE_LIMITS.images - references.length).map(async (blob, index) => {
                     const image = await uploadImage(blob);
                     return { id: nanoid(), name: `clipboard-${index + 1}.png`, type: image.mimeType, dataUrl: image.url, storageKey: image.storageKey };
                 }),
             );
-            setReferences((value) => [...value, ...nextReferences].slice(0, referenceLimits.images));
-            message.success(`已读取 ${nextReferences.length} 张参考图`);
+            setReferences((value) => [...value, ...nextReferences].slice(0, SEEDANCE_REFERENCE_LIMITS.images));
+            message.success(t("videoWorkbench.clipboardAdded", { count: nextReferences.length }));
         } catch {
-            message.error("剪切板里没有可读取的图片");
+            message.error(t("videoWorkbench.clipboardEmpty"));
         }
     };
-
-    const openReferenceLink = (kind: "video" | "audio") => {
-        const limit = kind === "video" ? referenceLimits.videos : referenceLimits.audios;
-        const count = kind === "video" ? videoReferences.length : audioReferences.length;
-        if (limit <= count) {
-            message.warning(limit ? `当前模型最多支持 ${limit} 个参考${kind === "video" ? "视频" : "音频"}` : `当前模型不支持参考${kind === "video" ? "视频" : "音频"}`);
-            return;
-        }
-        setReferenceLinkKind(kind);
-        setReferenceLinkValue("");
-    };
-
-    const addReferenceLink = () => {
-        const value = referenceLinkValue.trim();
-        let parsed: URL;
-        try {
-            parsed = new URL(value);
-        } catch {
-            message.error("请输入有效的 HTTPS 直链");
-            return;
-        }
-        if (parsed.protocol !== "https:" || parsed.username || parsed.password || value.length > 8192) {
-            message.error("参考素材必须使用不含账号密码的 HTTPS 直链");
-            return;
-        }
-        const fallbackName = referenceLinkKind === "video" ? "reference.mp4" : "reference.mp3";
-        const name = (parsed.pathname.split("/").filter(Boolean).pop() || fallbackName).slice(0, 120);
-        if (referenceLinkKind === "video") {
-            setVideoReferences((items) => [...items, { id: nanoid(), name, type: "video/mp4", url: parsed.toString() }].slice(0, referenceLimits.videos));
-        } else if (referenceLinkKind === "audio") {
-            setAudioReferences((items) => [...items, { id: nanoid(), name, type: "audio/mpeg", url: parsed.toString() }].slice(0, referenceLimits.audios));
-        }
-        setReferenceLinkKind(null);
-        setReferenceLinkValue("");
-    };
-
     const generate = async () => {
+        const agentTaskId = agentTaskIdRef.current;
+        agentTaskIdRef.current = undefined;
         const snapshot = buildRequestSnapshot();
-        if (!snapshot) return;
+        if (!snapshot) {
+            if (agentTaskId) updateAgentTask(agentTaskId, { status: "failed", error: t("videoWorkbench.invalidParams") });
+            return;
+        }
         setElapsedMs(0);
         setRunning(true);
+        if (agentTaskId) updateAgentTask(agentTaskId, { status: "running", error: undefined });
         setPreviewLog(null);
         setResults([{ id: nanoid(), status: "pending" }]);
         const batchStartedAt = performance.now();
-        const idempotencyKey = createVideoGenerationIdempotencyKey();
-        const intentLog = buildLog({
-            prompt: snapshot.text,
-            model,
-            config: snapshot.config,
-            references: snapshot.references,
-            videoReferences: snapshot.videoReferences,
-            audioReferences: snapshot.audioReferences,
-            durationMs: 0,
-            status: "生成中",
-            idempotencyKey,
-        });
         setStartedAt(batchStartedAt);
         try {
-            setPreviewLog(intentLog);
-            await saveLog(intentLog);
-            const task = await createVideoGenerationTask(snapshot.config, snapshot.text, snapshot.references, snapshot.videoReferences, snapshot.audioReferences, { idempotencyKey });
-            const log = { ...intentLog, task };
-            setPreviewLog(log);
-            await saveLog(log);
-            void pollGenerationLog(log, snapshot.config);
+            const task = await createVideoGenerationTask(snapshot.config, snapshot.text, snapshot.references, snapshot.videoReferences, snapshot.audioReferences);
+            const log = buildLog({ prompt: snapshot.text, model, config: snapshot.config, references: snapshot.references, videoReferences: snapshot.videoReferences, audioReferences: snapshot.audioReferences, durationMs: 0, status: "pending", task });
+            await saveLog(log, false);
+            void pollGenerationLog(log, snapshot.config, agentTaskId);
         } catch (error) {
-            const errorMessage = error instanceof Error ? error.message : "生成失败";
-            const canCreateReplacement = error instanceof VideoGenerationTerminalError && error.canCreateReplacement;
-            setResults([{ id: intentLog.id, status: "failed", error: errorMessage }]);
-            const failedLog = {
-                ...intentLog,
-                durationMs: performance.now() - batchStartedAt,
-                status: canCreateReplacement ? ("失败" as const) : ("待查询" as const),
-                idempotencyKey: canCreateReplacement ? undefined : intentLog.idempotencyKey,
-                error: errorMessage,
-            };
-            setPreviewLog(failedLog);
-            try {
-                await saveLog(failedLog);
-            } catch {
-                // The upstream request is not attempted when the local intent cannot be persisted.
-            }
+            const errorMessage = error instanceof Error ? error.message : t("workbench.generationFailed");
+            setResults([{ id: nanoid(), status: "failed", error: errorMessage }]);
+            if (agentTaskId) updateAgentTask(agentTaskId, { status: "failed", successCount: 0, failCount: 1, error: errorMessage });
+            await saveLog(buildLog({ prompt: snapshot.text, model, config: snapshot.config, references: snapshot.references, videoReferences: snapshot.videoReferences, audioReferences: snapshot.audioReferences, durationMs: performance.now() - batchStartedAt, status: "failed", error: errorMessage }));
             message.error(errorMessage);
             setRunning(false);
         }
     };
 
+    // Handle video-generation commands from the Agent panel by setting the prompt and optionally starting generation.
+    useEffect(() => {
+        if (!videoCommand || videoCommand.nonce === processedCommandRef.current) return;
+        processedCommandRef.current = videoCommand.nonce;
+        clearVideoCommand();
+        if (typeof videoCommand.prompt === "string") setPrompt(videoCommand.prompt);
+        if (videoCommand.run && running) {
+            if (videoCommand.taskId) updateAgentTask(videoCommand.taskId, { status: "failed", error: t("videoWorkbench.busy") });
+            return;
+        }
+        if (videoCommand.run) {
+            agentTaskIdRef.current = videoCommand.taskId;
+            setAutoRunToken((value) => value + 1);
+        }
+    }, [videoCommand, clearVideoCommand, running, updateAgentTask]);
+
+    useEffect(() => {
+        if (!autoRunToken) return;
+        void generate();
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [autoRunToken]);
+
     const buildRequestSnapshot = () => {
         const text = prompt.trim();
         if (!text) {
-            message.error("请输入视频提示词");
+            message.error(t("videoWorkbench.promptRequired"));
             return null;
         }
         if (!isAiConfigReady(effectiveConfig, model)) {
-            message.warning("请先完成配置");
+            message.warning(t("workbench.configFirst"));
             openConfigDialog(true);
             return null;
         }
-        const requestConfig = buildVideoConfig(effectiveConfig, model);
-        if (normalizeVideoReferenceMode(requestConfig.videoReferenceMode) === "frames" && supportsVideoFrameMode(model)) {
-            const seedanceFrames = isSeedanceVideoModel(modelOptionName(model));
-            const invalidImageCount = seedanceFrames ? references.length !== 2 : references.length < 1 || references.length > 2;
-            if (invalidImageCount || videoReferences.length || audioReferences.length) {
-                message.error(seedanceFrames ? "Seedance 首尾帧模式需要且只能使用 2 张参考图，不能同时添加参考视频或音频" : "Omni 首尾帧模式需要 1 张首帧或 2 张首尾帧参考图，不能同时添加参考视频或音频");
-                return null;
-            }
+        const videoReferenceError = seedanceVideoReferenceError(videoReferences);
+        if (videoReferenceError) {
+            message.error(t("videoWorkbench.referenceError", { error: videoReferenceError, hint: seedanceVideoReferenceHint() }));
+            return null;
         }
-        if (isSeedanceVideoConfig(requestConfig)) {
-            const validationModel = isArkPlanBaseUrl(requestConfig.baseUrl) ? "" : modelOptionName(requestConfig.model || requestConfig.videoModel);
-            const videoReferenceError = seedanceVideoReferenceError(videoReferences, validationModel);
-            if (videoReferenceError) {
-                message.error(`${videoReferenceError}。${seedanceVideoReferenceHint}`);
-                return null;
-            }
-        }
-        return { text, config: requestConfig, references: [...references], videoReferences: [...videoReferences], audioReferences: [...audioReferences] };
+        return { text, config: buildVideoConfig(effectiveConfig, model), references: [...references], videoReferences: [...videoReferences], audioReferences: [...audioReferences] };
     };
 
     const retryResult = () => {
-        if (previewLog?.task && !previewLog.video) {
-            const resumedLog = { ...previewLog, status: "生成中" as const, error: undefined };
-            setResults([{ id: resumedLog.id, status: "pending" }]);
-            setPreviewLog(resumedLog);
-            void saveLog(resumedLog).then(() => pollGenerationLog(resumedLog));
-            return;
-        }
-        if (previewLog?.idempotencyKey && !previewLog.video) {
-            const resumedLog = { ...previewLog, status: "生成中" as const, error: undefined };
-            const taskConfig = buildVideoConfig({ ...effectiveConfig, ...resumedLog.config }, resumedLog.model);
-            setResults([{ id: resumedLog.id, status: "pending" }]);
-            setPreviewLog(resumedLog);
-            setRunning(true);
-            void saveLog(resumedLog)
-                .then(() => createVideoGenerationTask(taskConfig, resumedLog.prompt, resumedLog.references, resumedLog.videoReferences, resumedLog.audioReferences, { idempotencyKey: resumedLog.idempotencyKey }))
-                .then(async (task) => {
-                    const submittedLog = { ...resumedLog, task };
-                    await saveLog(submittedLog);
-                    await pollGenerationLog(submittedLog, taskConfig);
-                })
-                .catch(async (error) => {
-                    const errorMessage = error instanceof Error ? error.message : "视频任务提交失败";
-                    const canCreateReplacement = error instanceof VideoGenerationTerminalError && error.canCreateReplacement;
-                    setResults([{ id: resumedLog.id, status: "failed", error: errorMessage }]);
-                    await saveLog({
-                        ...resumedLog,
-                        status: canCreateReplacement ? "失败" : "待查询",
-                        idempotencyKey: canCreateReplacement ? undefined : resumedLog.idempotencyKey,
-                        error: errorMessage,
-                    });
-                    message.error(errorMessage);
-                    setRunning(false);
-                });
-            return;
-        }
         void generate();
     };
 
@@ -360,32 +277,24 @@ export default function VideoPage() {
     const saveResultToAssets = (video: GeneratedVideo) => {
         addAsset({
             kind: "video",
-            title: "生成视频",
+            title: t("videoWorkbench.resultTitle"),
             coverUrl: "",
             tags: [],
-            source: "视频创作台",
+            source: t("videoWorkbench.source"),
             data: { url: video.url, storageKey: video.storageKey, width: video.width, height: video.height, bytes: video.bytes, mimeType: video.mimeType },
             metadata: { source: "video-page", prompt },
         });
-        message.success("已加入我的素材");
+        message.success(t("common.addedToAssets"));
     };
 
     const insertPickedAsset = async (payload: InsertAssetPayload) => {
         if (payload.kind === "text") {
             setPrompt(payload.content);
         } else if (payload.kind === "image") {
-            if (!referenceLimits.images) {
-                message.warning("当前模型不支持参考图");
-                return;
-            }
             const stored = await uploadImage(payload.dataUrl);
-            setReferences((value) => [...value, { id: nanoid(), name: payload.title, type: stored.mimeType, dataUrl: stored.url, storageKey: stored.storageKey }].slice(0, referenceLimits.images));
+            setReferences((value) => [...value, { id: nanoid(), name: payload.title, type: stored.mimeType, dataUrl: stored.url, storageKey: stored.storageKey }].slice(0, SEEDANCE_REFERENCE_LIMITS.images));
         } else if (payload.kind === "video") {
-            if (!referenceLimits.videos) {
-                message.warning("当前模型不支持参考视频");
-                return;
-            }
-            setVideoReferences((value) => [...value, { id: nanoid(), name: payload.title, type: "video/mp4", url: payload.url, storageKey: payload.storageKey, width: payload.width, height: payload.height }].slice(0, referenceLimits.videos));
+            setVideoReferences((value) => [...value, { id: nanoid(), name: payload.title, type: "video/mp4", url: payload.url, storageKey: payload.storageKey, width: payload.width, height: payload.height }].slice(0, SEEDANCE_REFERENCE_LIMITS.videos));
         }
         setAssetPickerOpen(false);
     };
@@ -403,11 +312,11 @@ export default function VideoPage() {
     };
 
     const deleteSelectedLogs = () => {
-        const remainingLogs = logs.filter((log) => !selectedLogIds.includes(log.id));
-        void Promise.all(selectedLogIds.map((id) => logStore.removeItem(id))).then(async () => {
-            cleanupAssets({ logs: remainingLogs });
-            await refreshLogs();
-        });
+        const mediaKeys = logs
+            .filter((log) => selectedLogIds.includes(log.id))
+            .map((log) => log.video?.storageKey)
+            .filter((key): key is string => Boolean(key));
+        void Promise.all([deleteStoredMedia(mediaKeys), ...selectedLogIds.map((id) => logStore.removeItem(id))]).then(() => refreshLogs());
         if (previewLog && selectedLogIds.includes(previewLog.id)) {
             setPreviewLog(null);
             setResults([]);
@@ -416,70 +325,61 @@ export default function VideoPage() {
         setDeleteConfirmOpen(false);
     };
 
-    const saveLog = async (log: GenerationLog) => {
+    const saveLog = async (log: GenerationLog, resumePending = true) => {
         await logStore.setItem(log.id, serializeLog(log));
-        setPreviewLog((current) => (current?.id === log.id ? log : current));
-        await refreshLogs();
+        await refreshLogs(resumePending);
     };
 
-    const refreshLogs = async () => {
+    const refreshLogs = async (resumePending = true) => {
         const nextLogs = await readStoredLogs();
         setLogs(nextLogs);
-        resumePendingLogs(nextLogs);
+        if (resumePending) resumePendingLogs(nextLogs);
         return nextLogs;
     };
 
     const resumePendingLogs = (items: GenerationLog[]) => {
         for (const log of items) {
-            if (log.status === "生成中" && log.task) void pollGenerationLog(log);
+            if (log.status === "pending" && log.task) void pollGenerationLog(log);
         }
     };
 
-    const pollGenerationLog = async (log: GenerationLog, configOverride?: AiConfig) => {
+    const pollGenerationLog = async (log: GenerationLog, configOverride?: AiConfig, agentTaskId?: string) => {
         if (!log.task || activeLogIdsRef.current.has(log.id)) return;
         activeLogIdsRef.current.add(log.id);
         setRunning(true);
         setStartedAt((value) => value || performance.now());
         setResults((value) => (value.length ? value : [{ id: log.id, status: "pending" }]));
         const taskConfig = buildVideoConfig({ ...effectiveConfig, ...log.config }, log.task.model || log.model);
-        let activeLog = log;
         try {
-            const result = await waitForVideoGenerationTask(configOverride || taskConfig, log.task, {
-                onTaskChange: async (task) => {
-                    activeLog = { ...activeLog, task };
-                    await logStore.setItem(activeLog.id, serializeLog(activeLog));
-                    setLogs((current) => current.map((item) => (item.id === activeLog.id ? activeLog : item)));
-                    setPreviewLog((current) => (current?.id === activeLog.id ? activeLog : current));
-                },
-            });
-            const stored = await storeGeneratedVideo(result);
-            const nextVideo: GeneratedVideo = {
-                id: nanoid(),
-                url: stored.url,
-                storageKey: stored.storageKey,
-                durationMs: stored.durationMs || 0,
-                width: stored.width || 1280,
-                height: stored.height || 720,
-                bytes: stored.bytes,
-                mimeType: stored.mimeType,
-            };
-            const elapsedMs = Date.now() - log.createdAt;
-            setResults([{ id: nextVideo.id, status: "success", video: nextVideo }]);
-            await saveLog({ ...activeLog, status: "成功", durationMs: elapsedMs, video: nextVideo, error: undefined });
-            message.success("视频已生成");
+            for (let attempt = 0; attempt < 120; attempt += 1) {
+                const state = await pollVideoGenerationTask(configOverride || taskConfig, log.task);
+                if (state.status === "completed") {
+                    const stored = await storeGeneratedVideo(state.result);
+                    const nextVideo: GeneratedVideo = {
+                        id: nanoid(),
+                        url: stored.url,
+                        storageKey: stored.storageKey,
+                        durationMs: Date.now() - log.createdAt,
+                        width: stored.width || 1280,
+                        height: stored.height || 720,
+                        bytes: stored.bytes,
+                        mimeType: stored.mimeType,
+                    };
+                    setResults([{ id: nextVideo.id, status: "success", video: nextVideo }]);
+                    if (agentTaskId) updateAgentTask(agentTaskId, { status: "succeeded", successCount: 1, failCount: 0, error: undefined });
+                    await saveLog({ ...log, status: "success", durationMs: nextVideo.durationMs, video: nextVideo, error: undefined });
+                    message.success(t("videoWorkbench.generated"));
+                    return;
+                }
+                if (state.status === "failed") throw new Error(state.error);
+                if (attempt === 119) throw new Error(t("videoWorkbench.timeout"));
+                await delay(log.task.provider === "seedance" ? 5000 : 2500);
+            }
         } catch (error) {
-            const errorMessage = error instanceof Error ? error.message : "生成失败";
+            const errorMessage = error instanceof Error ? error.message : t("workbench.generationFailed");
             setResults([{ id: log.id, status: "failed", error: errorMessage }]);
-            const terminal = error instanceof VideoGenerationTerminalError;
-            const canCreateReplacement = terminal && error.canCreateReplacement;
-            await saveLog({
-                ...activeLog,
-                status: canCreateReplacement ? "失败" : "待查询",
-                durationMs: Date.now() - log.createdAt,
-                task: canCreateReplacement ? undefined : activeLog.task,
-                idempotencyKey: canCreateReplacement ? undefined : activeLog.idempotencyKey,
-                error: errorMessage,
-            });
+            if (agentTaskId) updateAgentTask(agentTaskId, { status: "failed", successCount: 0, failCount: 1, error: errorMessage });
+            await saveLog({ ...log, status: "failed", durationMs: Date.now() - log.createdAt, error: errorMessage });
             message.error(errorMessage);
         } finally {
             activeLogIdsRef.current.delete(log.id);
@@ -503,146 +403,130 @@ export default function VideoPage() {
         if (log.config.videoSeconds) updateConfig("videoSeconds", log.config.videoSeconds);
         if (log.config.videoGenerateAudio) updateConfig("videoGenerateAudio", log.config.videoGenerateAudio);
         if (log.config.videoWatermark) updateConfig("videoWatermark", log.config.videoWatermark);
-        if (log.config.videoReferenceMode) updateConfig("videoReferenceMode", log.config.videoReferenceMode);
-        setResults(
-            log.status === "生成中"
-                ? [{ id: log.id, status: "pending" }]
-                : log.video
-                  ? [{ id: log.video.id, status: "success", video: log.video }]
-                  : [{ id: log.id, status: "failed", error: log.error || (log.status === "待查询" ? "查询已暂停，可继续查询原任务" : "生成失败") }],
-        );
+        setResults(log.status === "pending" ? [{ id: log.id, status: "pending" }] : log.video ? [{ id: log.video.id, status: "success", video: log.video }] : [{ id: log.id, status: "failed", error: log.error || t("workbench.generationFailed") }]);
     };
 
     return (
         <div className="flex h-full flex-col overflow-hidden bg-stone-50 text-stone-900 dark:bg-stone-950 dark:text-stone-100">
-            <main className="grid min-h-0 min-w-0 flex-1 grid-cols-1 gap-3 overflow-y-auto p-3 lg:grid-cols-[300px_minmax(0,1fr)] lg:overflow-hidden xl:grid-cols-[320px_minmax(0,1fr)]">
+            <main className="grid min-h-0 flex-1 grid-cols-1 gap-3 overflow-y-auto p-3 lg:grid-cols-[300px_minmax(0,1fr)] lg:overflow-hidden xl:grid-cols-[320px_minmax(0,1fr)]">
                 <aside className="thin-scrollbar hidden min-h-0 overflow-y-auto rounded-lg border border-stone-200 bg-card p-4 shadow-sm dark:border-stone-800 lg:block">
-                    <LogPanel
-                        logs={logs}
-                        selectedLogIds={selectedLogIds}
-                        activeLogId={previewLog?.id}
-                        onSelectedLogIdsChange={setSelectedLogIds}
-                        onCreateSession={createSession}
-                        onDeleteSelected={() => setDeleteConfirmOpen(true)}
-                        onPreviewLog={previewGenerationLog}
-                    />
+                    <LogPanel logs={logs} selectedLogIds={selectedLogIds} activeLogId={previewLog?.id} onSelectedLogIdsChange={setSelectedLogIds} onCreateSession={createSession} onDeleteSelected={() => setDeleteConfirmOpen(true)} onPreviewLog={previewGenerationLog} />
                 </aside>
 
-                <section className="grid min-w-0 gap-3 lg:min-h-0 lg:overflow-hidden xl:grid-cols-[420px_minmax(0,1fr)]">
-                    <div className="thin-scrollbar flex min-w-0 flex-col rounded-lg border border-stone-200 bg-card p-4 shadow-sm dark:border-stone-800 lg:min-h-0 lg:overflow-y-auto">
-                        <div className="flex flex-wrap items-start justify-between gap-3">
-                            <h1 className="text-2xl font-semibold text-stone-950 dark:text-stone-100">视频创作台</h1>
+                <section className="grid gap-3 lg:min-h-0 lg:overflow-hidden xl:grid-cols-[420px_minmax(0,1fr)]">
+                    <div className="thin-scrollbar flex flex-col rounded-lg border border-stone-200 bg-card p-4 shadow-sm dark:border-stone-800 lg:min-h-0 lg:overflow-y-auto">
+                        <div className="flex items-start justify-between gap-3">
+                            <h1 className="text-2xl font-semibold text-stone-950 dark:text-stone-100">{t("videoWorkbench.title")}</h1>
                             <div className="flex shrink-0 gap-2 lg:hidden">
                                 <Button icon={<History className="size-4" />} onClick={() => setLogsOpen(true)}>
-                                    记录
+                                    {t("workbench.logs")}
                                 </Button>
                                 <Button icon={<SlidersHorizontal className="size-4" />} onClick={() => setSettingsOpen(true)}>
-                                    参数
+                                    {t("workbench.settings")}
                                 </Button>
                             </div>
                         </div>
 
                         <div className="mt-6 space-y-5">
                             <div>
-                                <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
-                                    <span className="text-base font-semibold">提示词</span>
-                                    <div className="flex flex-wrap justify-end gap-2">
+                                <div className="mb-2 flex items-center justify-between gap-3">
+                                    <span className="text-base font-semibold">{t("workbench.prompt")}</span>
+                                    <div className="flex gap-2">
                                         <Button size="small" icon={<BookOpen className="size-3.5" />} onClick={() => setPromptDialogOpen(true)}>
-                                            查看提示词库
+                                            {t("workbench.viewPrompts")}
                                         </Button>
                                         <Button size="small" icon={<FolderPlus className="size-3.5" />} onClick={() => setAssetPickerOpen(true)}>
-                                            查看我的素材
+                                            {t("workbench.viewAssets")}
                                         </Button>
                                     </div>
                                 </div>
-                                <Input.TextArea value={prompt} onChange={(event) => setPrompt(event.target.value)} rows={7} placeholder="描述镜头运动、主体动作、场景氛围和画面风格" />
+                                <Input.TextArea value={prompt} onChange={(event) => setPrompt(event.target.value)} rows={7} placeholder={t("videoWorkbench.promptPlaceholder")} />
                             </div>
 
                             <div className="min-w-0">
-                                <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
-                                    <span className="text-base font-semibold">{firstLastFrameMode ? "首尾帧" : "参考图"}</span>
-                                    <div className="flex flex-wrap justify-end gap-2">
-                                        <Button size="small" icon={<ClipboardPaste className="size-3.5" />} disabled={!referenceLimits.images} onClick={() => void addReferencesFromClipboard()}>
-                                            剪切板
+                                <div className="mb-2 flex items-center justify-between gap-3">
+                                    <span className="text-base font-semibold">{t("videoWorkbench.references")}</span>
+                                    <div className="flex gap-2">
+                                        <Button size="small" icon={<ClipboardPaste className="size-3.5" />} onClick={() => void addReferencesFromClipboard()}>
+                                            {t("workbench.clipboard")}
                                         </Button>
-                                        <Button size="small" icon={<Upload className="size-3.5" />} disabled={!referenceLimits.images} onClick={() => openReferenceUpload("image")}>
-                                            上传
+                                        <Button size="small" icon={<Upload className="size-3.5" />} onClick={() => fileInputRef.current?.click()}>
+                                            {t("workbench.upload")}
                                         </Button>
                                     </div>
                                 </div>
-                                <div className="hover-scrollbar hover-scrollbar-hint flex min-h-24 w-full min-w-0 max-w-full gap-2 overflow-x-scroll overflow-y-hidden rounded-lg border border-dashed border-stone-300 p-2 pb-3 overscroll-x-contain dark:border-stone-700">
+                                <div
+                                    className={`hover-scrollbar hover-scrollbar-hint flex min-h-24 w-full min-w-0 max-w-full gap-2 overflow-x-scroll overflow-y-hidden rounded-lg border border-dashed p-2 pb-3 overscroll-x-contain transition-colors ${referenceDragTarget === "image" ? "border-stone-900 bg-stone-100/80 dark:border-stone-100 dark:bg-stone-900/80" : "border-stone-300 dark:border-stone-700"}`}
+                                    onDragEnter={(event) => handleReferenceDragEnter(event, "image")}
+                                    onDragOver={(event) => {
+                                        event.preventDefault();
+                                        event.dataTransfer.dropEffect = "copy";
+                                    }}
+                                    onDragLeave={handleReferenceDragLeave}
+                                    onDrop={handleReferenceDrop}
+                                >
                                     {references.map((item, index) => (
                                         <div key={item.id} className="group relative size-20 shrink-0 overflow-hidden rounded-md border border-stone-200 dark:border-stone-800">
                                             <img src={item.dataUrl} alt={item.name} className="size-full object-cover" />
-                                            <span className="absolute left-1 top-1 rounded bg-black/60 px-1.5 py-0.5 text-[10px] font-medium text-white">{firstLastFrameMode ? (index === 0 ? "首帧" : "尾帧") : seedanceReferenceLabel("image", index)}</span>
+                                            <span className="absolute left-1 top-1 rounded bg-black/60 px-1.5 py-0.5 text-[10px] font-medium text-white">{seedanceReferenceLabel("image", index)}</span>
                                             <ReferenceOrderButtons index={index} total={references.length} onMove={(offset) => setReferences((value) => moveListItem(value, index, offset))} />
-                                            <button
-                                                type="button"
-                                                className="absolute right-1 top-1 hidden size-6 items-center justify-center rounded bg-black/60 text-white group-hover:flex"
-                                                onClick={() => setReferences((value) => value.filter((ref) => ref.id !== item.id))}
-                                                aria-label="移除参考图"
-                                            >
+                                            <button type="button" className="absolute right-1 top-1 hidden size-6 items-center justify-center rounded bg-black/60 text-white group-hover:flex" onClick={() => setReferences((value) => value.filter((ref) => ref.id !== item.id))} aria-label={t("videoWorkbench.removeImage")}>
                                                 <Trash2 className="size-3.5" />
                                             </button>
                                         </div>
                                     ))}
-                                    {!references.length ? <div className="flex min-w-full items-center justify-center text-sm text-stone-500">{referenceLimits.images ? `暂无参考图，最多 ${referenceLimits.images} 张` : "当前模型不支持参考图"}</div> : null}
+                                    {!references.length ? <div className="flex min-w-full items-center justify-center text-sm text-stone-500">{referenceDragTarget === "image" ? t("videoWorkbench.dropReferences") : t("videoWorkbench.noImages")}</div> : null}
                                 </div>
                             </div>
 
                             <div className="min-w-0">
-                                <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
-                                    <span className="text-base font-semibold">参考视频</span>
-                                    <div className="flex flex-wrap justify-end gap-2">
-                                        <Button size="small" icon={<Link2 className="size-3.5" />} disabled={!referenceLimits.videos} onClick={() => openReferenceLink("video")}>
-                                            链接
-                                        </Button>
-                                        {!remoteReferenceMediaOnly ? (
-                                            <Button size="small" icon={<Upload className="size-3.5" />} disabled={!referenceLimits.videos} onClick={() => openReferenceUpload("video")}>
-                                                上传
-                                            </Button>
-                                        ) : null}
-                                    </div>
+                                <div className="mb-2 flex items-center justify-between gap-3">
+                                    <span className="text-base font-semibold">{t("videoWorkbench.videoReferences")}</span>
+                                    <Button size="small" icon={<Upload className="size-3.5" />} onClick={() => fileInputRef.current?.click()}>
+                                        {t("workbench.upload")}
+                                    </Button>
                                 </div>
-                                <div className="hover-scrollbar hover-scrollbar-hint flex min-h-24 w-full min-w-0 max-w-full gap-2 overflow-x-scroll overflow-y-hidden rounded-lg border border-dashed border-stone-300 p-2 pb-3 overscroll-x-contain dark:border-stone-700">
+                                <div
+                                    className={`hover-scrollbar hover-scrollbar-hint flex min-h-24 w-full min-w-0 max-w-full gap-2 overflow-x-scroll overflow-y-hidden rounded-lg border border-dashed p-2 pb-3 overscroll-x-contain transition-colors ${referenceDragTarget === "video" ? "border-stone-900 bg-stone-100/80 dark:border-stone-100 dark:bg-stone-900/80" : "border-stone-300 dark:border-stone-700"}`}
+                                    onDragEnter={(event) => handleReferenceDragEnter(event, "video")}
+                                    onDragOver={(event) => {
+                                        event.preventDefault();
+                                        event.dataTransfer.dropEffect = "copy";
+                                    }}
+                                    onDragLeave={handleReferenceDragLeave}
+                                    onDrop={handleReferenceDrop}
+                                >
                                     {videoReferences.map((item, index) => (
                                         <div key={item.id} className="group relative h-20 w-32 shrink-0 overflow-hidden rounded-md border border-stone-200 bg-black dark:border-stone-800">
                                             <video src={item.url} className="size-full object-cover" muted preload="metadata" />
                                             <span className="absolute left-1 top-1 rounded bg-black/60 px-1.5 py-0.5 text-[10px] font-medium text-white">{seedanceReferenceLabel("video", index)}</span>
                                             <ReferenceOrderButtons index={index} total={videoReferences.length} onMove={(offset) => setVideoReferences((value) => moveListItem(value, index, offset))} />
-                                            <button
-                                                type="button"
-                                                className="absolute right-1 top-1 hidden size-6 items-center justify-center rounded bg-black/60 text-white group-hover:flex"
-                                                onClick={() => setVideoReferences((value) => value.filter((ref) => ref.id !== item.id))}
-                                                aria-label="移除参考视频"
-                                            >
+                                            <button type="button" className="absolute right-1 top-1 hidden size-6 items-center justify-center rounded bg-black/60 text-white group-hover:flex" onClick={() => setVideoReferences((value) => value.filter((ref) => ref.id !== item.id))} aria-label={t("videoWorkbench.removeVideo")}>
                                                 <Trash2 className="size-3.5" />
                                             </button>
                                         </div>
                                     ))}
-                                    {!videoReferences.length ? (
-                                        <div className="flex min-w-full items-center justify-center text-sm text-stone-500">
-                                            {referenceLimits.videos ? `${remoteReferenceMediaOnly ? "请添加 HTTPS 直链" : "暂无参考视频"}，最多 ${referenceLimits.videos} 个` : "当前模型不支持参考视频"}
-                                        </div>
-                                    ) : null}
+                                    {!videoReferences.length ? <div className="flex min-w-full items-center justify-center text-sm text-stone-500">{referenceDragTarget === "video" ? t("videoWorkbench.dropReferences") : t("videoWorkbench.noVideos")}</div> : null}
                                 </div>
                             </div>
 
                             <div className="min-w-0">
-                                <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
-                                    <span className="text-base font-semibold">参考音频</span>
-                                    <div className="flex flex-wrap justify-end gap-2">
-                                        <Button size="small" icon={<Link2 className="size-3.5" />} disabled={!referenceLimits.audios} onClick={() => openReferenceLink("audio")}>
-                                            链接
-                                        </Button>
-                                        {!remoteReferenceMediaOnly ? (
-                                            <Button size="small" icon={<Upload className="size-3.5" />} disabled={!referenceLimits.audios} onClick={() => openReferenceUpload("audio")}>
-                                                上传
-                                            </Button>
-                                        ) : null}
-                                    </div>
+                                <div className="mb-2 flex items-center justify-between gap-3">
+                                    <span className="text-base font-semibold">{t("videoWorkbench.audioReferences")}</span>
+                                    <Button size="small" icon={<Upload className="size-3.5" />} onClick={() => fileInputRef.current?.click()}>
+                                        {t("workbench.upload")}
+                                    </Button>
                                 </div>
-                                <div className="hover-scrollbar hover-scrollbar-hint flex min-h-24 w-full min-w-0 max-w-full gap-2 overflow-x-scroll overflow-y-hidden rounded-lg border border-dashed border-stone-300 p-2 pb-3 overscroll-x-contain dark:border-stone-700">
+                                <div
+                                    className={`hover-scrollbar hover-scrollbar-hint flex min-h-24 w-full min-w-0 max-w-full gap-2 overflow-x-scroll overflow-y-hidden rounded-lg border border-dashed p-2 pb-3 overscroll-x-contain transition-colors ${referenceDragTarget === "audio" ? "border-stone-900 bg-stone-100/80 dark:border-stone-100 dark:bg-stone-900/80" : "border-stone-300 dark:border-stone-700"}`}
+                                    onDragEnter={(event) => handleReferenceDragEnter(event, "audio")}
+                                    onDragOver={(event) => {
+                                        event.preventDefault();
+                                        event.dataTransfer.dropEffect = "copy";
+                                    }}
+                                    onDragLeave={handleReferenceDragLeave}
+                                    onDrop={handleReferenceDrop}
+                                >
                                     {audioReferences.map((item, index) => (
                                         <div key={item.id} className="group relative flex h-20 w-48 shrink-0 flex-col justify-center gap-2 rounded-md border border-stone-200 bg-stone-50 px-2 dark:border-stone-800 dark:bg-stone-900">
                                             <div className="flex min-w-0 items-center gap-2 text-xs text-stone-500 dark:text-stone-400">
@@ -652,30 +536,21 @@ export default function VideoPage() {
                                             </div>
                                             <audio src={item.url} controls className="h-8 w-full" preload="metadata" />
                                             <ReferenceOrderButtons index={index} total={audioReferences.length} onMove={(offset) => setAudioReferences((value) => moveListItem(value, index, offset))} />
-                                            <button
-                                                type="button"
-                                                className="absolute right-1 top-1 hidden size-6 items-center justify-center rounded bg-black/60 text-white group-hover:flex"
-                                                onClick={() => setAudioReferences((value) => value.filter((ref) => ref.id !== item.id))}
-                                                aria-label="移除参考音频"
-                                            >
+                                            <button type="button" className="absolute right-1 top-1 hidden size-6 items-center justify-center rounded bg-black/60 text-white group-hover:flex" onClick={() => setAudioReferences((value) => value.filter((ref) => ref.id !== item.id))} aria-label={t("videoWorkbench.removeAudio")}>
                                                 <Trash2 className="size-3.5" />
                                             </button>
                                         </div>
                                     ))}
-                                    {!audioReferences.length ? (
-                                        <div className="flex min-w-full items-center justify-center text-center text-sm text-stone-500">
-                                            {referenceLimits.audios ? `${remoteReferenceMediaOnly ? "请添加 HTTPS 直链" : "暂无参考音频"}，最多 ${referenceLimits.audios} 个` : "当前模型不支持参考音频"}
-                                        </div>
-                                    ) : null}
+                                    {!audioReferences.length ? <div className="flex min-w-full items-center justify-center text-center text-sm text-stone-500">{referenceDragTarget === "audio" ? t("videoWorkbench.dropReferences") : t("videoWorkbench.noAudio")}</div> : null}
                                 </div>
                             </div>
 
-                            <div className="flex min-w-0 items-center justify-between gap-2 rounded-lg border border-stone-200 bg-stone-50 px-3 py-2 text-sm dark:border-stone-800 dark:bg-stone-900 sm:hidden">
+                            <div className="flex items-center justify-between rounded-lg border border-stone-200 bg-stone-50 px-3 py-2 text-sm dark:border-stone-800 dark:bg-stone-900 sm:hidden">
                                 <span className="truncate text-stone-500 dark:text-stone-400">
                                     {modelOptionLabel(effectiveConfig, model)} · {normalizeResolution(effectiveConfig.vquality)}p · {videoSizeLabel(effectiveConfig.size)} · {normalizeVideoSeconds(effectiveConfig.videoSeconds)}s
                                 </span>
                                 <Button size="small" type="text" icon={<SlidersHorizontal className="size-4" />} onClick={() => setSettingsOpen(true)}>
-                                    调整
+                                    {t("workbench.adjust")}
                                 </Button>
                             </div>
 
@@ -686,37 +561,24 @@ export default function VideoPage() {
 
                         <div className="mt-auto pt-6">
                             <Button type="primary" size="large" block icon={<Sparkles className="size-4" />} loading={running} disabled={!canGenerate || running} onClick={() => void generate()}>
-                                开始生成
+                                {t("workbench.generate")}
                             </Button>
                         </div>
                     </div>
 
-                    <div className="thin-scrollbar min-w-0 rounded-lg border border-stone-200 bg-card p-4 shadow-sm dark:border-stone-800 lg:min-h-0 lg:overflow-y-auto lg:p-5">
+                    <div className="thin-scrollbar rounded-lg border border-stone-200 bg-card p-4 shadow-sm dark:border-stone-800 lg:min-h-0 lg:overflow-y-auto lg:p-5">
                         <div className="mb-4 flex items-center justify-between gap-3">
-                            <h2 className="text-xl font-semibold">生成结果</h2>
-                            {running ? <Tag className="m-0 px-2 py-1">等待 {formatDuration(elapsedMs)}</Tag> : null}
+                            <h2 className="text-xl font-semibold">{t("workbench.results")}</h2>
+                            {running ? <Tag className="m-0 px-2 py-1">{t("workbench.waiting", { time: formatDuration(elapsedMs) })}</Tag> : null}
                         </div>
                         {results.length ? (
                             <div className="grid gap-4">
-                                {results.map((result) =>
-                                    result.status === "success" && result.video ? (
-                                        <ResultVideoCard key={result.id} video={result.video} onDownload={downloadVideo} onSaveAsset={saveResultToAssets} />
-                                    ) : result.status === "failed" ? (
-                                        <FailedVideoCard
-                                            key={result.id}
-                                            error={result.error || "生成失败"}
-                                            retryLabel={previewLog?.task && !previewLog.video ? "继续查询" : previewLog?.idempotencyKey && !previewLog.video ? "继续提交" : "重试"}
-                                            onRetry={retryResult}
-                                        />
-                                    ) : (
-                                        <PendingVideoCard key={result.id} />
-                                    ),
-                                )}
+                                {results.map((result) => (result.status === "success" && result.video ? <ResultVideoCard key={result.id} video={result.video} onDownload={downloadVideo} onSaveAsset={saveResultToAssets} /> : result.status === "failed" ? <FailedVideoCard key={result.id} error={result.error || t("workbench.generationFailed")} onRetry={retryResult} /> : <PendingVideoCard key={result.id} />))}
                             </div>
                         ) : (
                             <div className="flex min-h-[320px] flex-col items-center justify-center rounded-lg border border-dashed border-stone-300 text-center dark:border-stone-700 lg:min-h-[560px]">
                                 <VideoIcon className="mb-4 size-11 text-stone-400" />
-                                <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="还没有生成视频" />
+                                <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description={t("videoWorkbench.empty")} />
                             </div>
                         )}
                     </div>
@@ -733,47 +595,18 @@ export default function VideoPage() {
                     event.target.value = "";
                 }}
             />
-            <Drawer title="生成记录" placement="bottom" size="large" open={logsOpen} onClose={() => setLogsOpen(false)}>
-                <LogPanel
-                    logs={logs}
-                    selectedLogIds={selectedLogIds}
-                    activeLogId={previewLog?.id}
-                    onSelectedLogIdsChange={setSelectedLogIds}
-                    onCreateSession={createSession}
-                    onDeleteSelected={() => setDeleteConfirmOpen(true)}
-                    onPreviewLog={previewGenerationLog}
-                />
+            <Drawer title={t("workbench.logs")} placement="bottom" size="large" open={logsOpen} onClose={() => setLogsOpen(false)}>
+                <LogPanel logs={logs} selectedLogIds={selectedLogIds} activeLogId={previewLog?.id} onSelectedLogIdsChange={setSelectedLogIds} onCreateSession={createSession} onDeleteSelected={() => setDeleteConfirmOpen(true)} onPreviewLog={previewGenerationLog} />
             </Drawer>
-            <Drawer title="参数" placement="bottom" size="82vh" open={settingsOpen} onClose={() => setSettingsOpen(false)}>
+            <Drawer title={t("workbench.settings")} placement="bottom" height="82vh" open={settingsOpen} onClose={() => setSettingsOpen(false)}>
                 <div className="grid grid-cols-2 gap-3 pb-4">
                     <GenerationSettings config={effectiveConfig} model={model} updateConfig={updateConfig} openConfigDialog={openConfigDialog} />
                 </div>
             </Drawer>
             <PromptSelectDialog open={promptDialogOpen} onOpenChange={setPromptDialogOpen} onSelect={setPrompt} />
             <AssetPickerModal open={assetPickerOpen} defaultTab="my-assets" onInsert={(payload) => void insertPickedAsset(payload)} onClose={() => setAssetPickerOpen(false)} />
-            <Modal
-                title={referenceLinkKind === "video" ? "添加参考视频链接" : "添加参考音频链接"}
-                open={Boolean(referenceLinkKind)}
-                onCancel={() => {
-                    setReferenceLinkKind(null);
-                    setReferenceLinkValue("");
-                }}
-                onOk={addReferenceLink}
-                okText="添加"
-                cancelText="取消"
-                okButtonProps={{ disabled: !referenceLinkValue.trim() }}
-            >
-                <Input
-                    prefix={<Link2 className="size-4 text-stone-400" />}
-                    value={referenceLinkValue}
-                    placeholder="https://example.com/reference.mp4"
-                    maxLength={8192}
-                    onChange={(event) => setReferenceLinkValue(event.target.value)}
-                    onPressEnter={addReferenceLink}
-                />
-            </Modal>
-            <Modal title="删除生成记录" open={deleteConfirmOpen} onCancel={() => setDeleteConfirmOpen(false)} onOk={deleteSelectedLogs} okText="删除" okButtonProps={{ danger: true }} cancelText="取消">
-                确定删除选中的 {selectedLogIds.length} 条生成记录吗？
+            <Modal title={t("workbench.deleteLogs")} open={deleteConfirmOpen} onCancel={() => setDeleteConfirmOpen(false)} onOk={deleteSelectedLogs} okText={t("common.delete")} okButtonProps={{ danger: true }} cancelText={t("common.cancel")}>
+                {t("workbench.deleteLogsConfirm", { count: selectedLogIds.length })}
             </Modal>
         </div>
     );
@@ -781,28 +614,26 @@ export default function VideoPage() {
 
 function GenerationSettings({ config, model, updateConfig, openConfigDialog }: { config: AiConfig; model: string; updateConfig: UpdateAiConfig; openConfigDialog: (shouldPromptContinue?: boolean) => void }) {
     const theme = canvasThemes[useThemeStore((state) => state.theme)];
-    const requestConfig = resolveModelRequestConfig(config, model);
+    const { t } = useTranslation();
 
     return (
         <>
             <label className="col-span-2 block min-w-0 sm:col-span-1">
-                <span className="mb-1.5 block text-sm font-semibold sm:mb-2 sm:text-base">模型</span>
+                <span className="mb-1.5 block text-sm font-semibold sm:mb-2 sm:text-base">{t("workbench.model")}</span>
                 <ModelPicker config={config} value={model} onChange={(value) => updateConfig("videoModel", value)} capability="video" fullWidth onMissingConfig={() => openConfigDialog(false)} />
             </label>
             <div className="col-span-2">
-                <VideoSettingsPanel config={{ ...requestConfig, videoModel: model }} onConfigChange={(key, value) => updateConfig(key, value)} theme={theme} showTitle={false} className="space-y-4" />
+                <VideoSettingsPanel config={config} onConfigChange={(key, value) => updateConfig(key, value)} theme={theme} showTitle={false} className="space-y-4" />
             </div>
         </>
     );
 }
 
 function ResultVideoCard({ video, onDownload, onSaveAsset }: { video: GeneratedVideo; onDownload: (video: GeneratedVideo) => void; onSaveAsset: (video: GeneratedVideo) => void }) {
-    const aspectRatio = video.width > 0 && video.height > 0 ? `${video.width} / ${video.height}` : "16 / 9";
+    const { t } = useTranslation();
     return (
         <div className="overflow-hidden rounded-lg border border-stone-200 bg-background dark:border-stone-800">
-            <div className="flex w-full items-center justify-center bg-black" style={{ aspectRatio }}>
-                <video src={video.url} controls className="size-full object-contain" />
-            </div>
+            <video src={video.url} controls className="aspect-video w-full bg-black object-contain" />
             <div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-2 border-t border-stone-200 px-3 py-2.5 dark:border-stone-800">
                 <div className="flex min-w-0 flex-wrap gap-x-2 gap-y-1 text-xs text-stone-500 dark:text-stone-400">
                     <span>
@@ -813,10 +644,10 @@ function ResultVideoCard({ video, onDownload, onSaveAsset }: { video: GeneratedV
                 </div>
                 <div className="flex shrink-0 gap-1">
                     <Button size="small" icon={<FolderPlus className="size-3.5" />} onClick={() => onSaveAsset(video)}>
-                        添加到素材
+                        {t("common.addToAssets")}
                     </Button>
                     <Button size="small" icon={<Download className="size-3.5" />} onClick={() => onDownload(video)}>
-                        下载
+                        {t("common.download")}
                     </Button>
                 </div>
             </div>
@@ -825,28 +656,30 @@ function ResultVideoCard({ video, onDownload, onSaveAsset }: { video: GeneratedV
 }
 
 function PendingVideoCard() {
+    const { t } = useTranslation();
     return (
         <div className="relative aspect-video overflow-hidden rounded-lg border border-dashed border-stone-300 bg-stone-50 dark:border-stone-700 dark:bg-stone-900">
             <div className="absolute inset-0 flex flex-col items-center justify-center gap-2 text-sm text-stone-500 dark:text-stone-400">
                 <LoaderCircle className="size-6 animate-spin" />
-                <span>生成中</span>
+                <span>{t("workbench.generating")}</span>
             </div>
         </div>
     );
 }
 
-function FailedVideoCard({ error, retryLabel, onRetry }: { error: string; retryLabel: string; onRetry: () => void }) {
+function FailedVideoCard({ error, onRetry }: { error: string; onRetry: () => void }) {
+    const { t } = useTranslation();
     return (
         <div className="overflow-hidden rounded-lg border border-red-200 bg-red-50 dark:border-red-950 dark:bg-red-950/20">
             <div className="flex aspect-video flex-col items-center justify-center gap-3 p-5 text-center">
-                <div className="text-sm font-medium text-red-600 dark:text-red-300">生成失败</div>
+                <div className="text-sm font-medium text-red-600 dark:text-red-300">{t("workbench.failed")}</div>
                 <Typography.Paragraph ellipsis={{ rows: 4 }} className="!mb-0 !text-xs !text-red-500 dark:!text-red-300">
                     {error}
                 </Typography.Paragraph>
             </div>
             <div className="flex justify-end border-t border-red-200 p-3 dark:border-red-950">
                 <Button size="small" danger onClick={onRetry}>
-                    {retryLabel}
+                    {t("workbench.retry")}
                 </Button>
             </div>
         </div>
@@ -870,50 +703,41 @@ function LogPanel({
     onDeleteSelected: () => void;
     onPreviewLog: (log: GenerationLog) => void;
 }) {
+    const { t } = useTranslation();
     const allSelected = Boolean(logs.length) && selectedLogIds.length === logs.length;
     const toggleAll = () => onSelectedLogIdsChange(allSelected ? [] : logs.map((log) => log.id));
 
     return (
         <>
             <div className="mb-3 flex items-center justify-between gap-3">
-                <h2 className="text-base font-semibold">生成记录</h2>
+                <h2 className="text-base font-semibold">{t("workbench.logs")}</h2>
                 <Tag className="m-0">{logs.length}</Tag>
             </div>
             <div className="mb-4 flex flex-wrap gap-2">
                 <Button size="small" icon={<Plus className="size-3.5" />} onClick={onCreateSession}>
-                    新建
+                    {t("workbench.new")}
                 </Button>
                 <Button size="small" icon={<CheckSquare className="size-3.5" />} disabled={!logs.length} onClick={toggleAll}>
-                    {allSelected ? "取消" : "全选"}
+                    {allSelected ? t("common.cancel") : t("workbench.selectAll")}
                 </Button>
                 <Button size="small" danger icon={<Trash2 className="size-3.5" />} disabled={!selectedLogIds.length} onClick={onDeleteSelected}>
-                    删除
+                    {t("common.delete")}
                 </Button>
             </div>
             <div className="space-y-3">
                 {logs.map((log) => (
-                    <LogCard
-                        key={log.id}
-                        log={log}
-                        selected={selectedLogIds.includes(log.id)}
-                        active={activeLogId === log.id}
-                        onSelectedChange={(checked) => onSelectedLogIdsChange(checked ? [...selectedLogIds, log.id] : selectedLogIds.filter((id) => id !== log.id))}
-                        onClick={() => onPreviewLog(log)}
-                    />
+                    <LogCard key={log.id} log={log} selected={selectedLogIds.includes(log.id)} active={activeLogId === log.id} onSelectedChange={(checked) => onSelectedLogIdsChange(checked ? [...selectedLogIds, log.id] : selectedLogIds.filter((id) => id !== log.id))} onClick={() => onPreviewLog(log)} />
                 ))}
-                {!logs.length ? <div className="flex min-h-48 items-center justify-center rounded-lg border border-dashed border-stone-300 text-center text-sm text-stone-500 dark:border-stone-700">暂无生成记录</div> : null}
+                {!logs.length ? <div className="flex min-h-48 items-center justify-center rounded-lg border border-dashed border-stone-300 text-center text-sm text-stone-500 dark:border-stone-700">{t("workbench.noLogs")}</div> : null}
             </div>
         </>
     );
 }
 
 function LogCard({ log, selected, active, onSelectedChange, onClick }: { log: GenerationLog; selected: boolean; active: boolean; onSelectedChange: (checked: boolean) => void; onClick: () => void }) {
+    const { t } = useTranslation();
     return (
-        <button
-            type="button"
-            className={`block w-full rounded-lg border p-2 text-left transition ${active ? "border-stone-900 bg-blue-50 dark:border-stone-100 dark:bg-blue-950/20" : "border-stone-200 bg-background hover:bg-stone-50 dark:border-stone-800 dark:hover:bg-stone-900"}`}
-            onClick={onClick}
-        >
+        <button type="button" className={`block w-full rounded-lg border p-2 text-left transition ${active ? "border-stone-900 bg-blue-50 dark:border-stone-100 dark:bg-blue-950/20" : "border-stone-200 bg-background hover:bg-stone-50 dark:border-stone-800 dark:hover:bg-stone-900"}`} onClick={onClick}>
             <div className="grid grid-cols-[auto_minmax(0,1fr)_auto] items-start gap-2">
                 <Checkbox className="mt-0.5" checked={selected} onClick={(event) => event.stopPropagation()} onChange={(event) => onSelectedChange(event.target.checked)} />
                 <div className="min-w-0">
@@ -925,8 +749,8 @@ function LogCard({ log, selected, active, onSelectedChange, onClick }: { log: Ge
                     </div>
                 </div>
                 <div className="grid justify-items-end gap-2">
-                    <Tag className="m-0 flex h-6 items-center rounded-md px-1.5 text-xs leading-none" color={log.status === "成功" ? "blue" : log.status === "生成中" ? "processing" : log.status === "待查询" ? "orange" : "red"}>
-                        {log.status}
+                    <Tag className="m-0 flex h-6 items-center rounded-md px-1.5 text-xs leading-none" color={log.status === "success" ? "blue" : log.status === "pending" ? "processing" : "red"}>
+                        {t(`workbench.${log.status === "success" ? "success" : log.status === "pending" ? "generating" : "failed"}`)}
                     </Tag>
                     <Tag className="m-0 flex h-6 items-center rounded-md px-1.5 text-xs leading-none" color="green">
                         {formatDuration(log.durationMs)}
@@ -974,9 +798,9 @@ async function normalizeLog(log: Partial<GenerationLog>): Promise<GenerationLog>
     return {
         id: log.id || nanoid(),
         createdAt: log.createdAt || Date.now(),
-        title: log.title || log.model || "未命名",
+        title: log.title || log.model || i18n.t("workbench.untitled"),
         prompt: log.prompt || "",
-        time: log.time || new Date().toLocaleString("zh-CN", { hour12: false }),
+        time: log.time || new Date().toLocaleString(i18n.resolvedLanguage, { hour12: false }),
         model: log.model || config.videoModel || "",
         config,
         references,
@@ -986,8 +810,7 @@ async function normalizeLog(log: Partial<GenerationLog>): Promise<GenerationLog>
         size: log.size || config.size || "",
         resolution: normalizeResolution(log.resolution || config.vquality || ""),
         seconds: log.seconds || config.videoSeconds || "",
-        status: log.status === "生成中" && !log.task && log.idempotencyKey ? "待查询" : log.status || "成功",
-        idempotencyKey: log.idempotencyKey,
+        status: log.status || "success",
         task: log.task,
         video,
         error: log.error,
@@ -997,7 +820,6 @@ async function normalizeLog(log: Partial<GenerationLog>): Promise<GenerationLog>
 function serializeLog(log: GenerationLog): GenerationLog {
     return {
         ...log,
-        task: log.task ? { ...log.task, result: undefined } : undefined,
         references: log.references.map((item) => ({ ...item, dataUrl: item.storageKey ? "" : item.dataUrl })),
         videoReferences: log.videoReferences.map((item) => (item.storageKey ? { ...item, url: "" } : item)),
         audioReferences: log.audioReferences.map((item) => (item.storageKey ? { ...item, url: "" } : item)),
@@ -1025,7 +847,7 @@ function filterAudioReferencesByDuration(existing: ReferenceAudio[], next: Refer
         total += item.durationMs || 0;
         accepted.push(item);
     }
-    if (skipped) warn("已忽略不符合时长要求的参考音频：单个 2-15 秒，总时长不超过 15 秒");
+    if (skipped) warn(i18n.t("videoWorkbench.audioDurationInvalid"));
     return accepted;
 }
 
@@ -1056,37 +878,10 @@ function normalizeLogConfig(log: Partial<GenerationLog>): GenerationLogConfig {
         videoSeconds: log.config?.videoSeconds || log.seconds || "",
         videoGenerateAudio: log.config?.videoGenerateAudio || "true",
         videoWatermark: log.config?.videoWatermark || "false",
-        videoReferenceMode: normalizeVideoReferenceMode(log.config?.videoReferenceMode),
     };
 }
 
-function buildLog({
-    prompt,
-    model,
-    config,
-    references,
-    videoReferences,
-    audioReferences,
-    durationMs,
-    status,
-    idempotencyKey,
-    task,
-    video,
-    error,
-}: {
-    prompt: string;
-    model: string;
-    config: AiConfig;
-    references: ReferenceImage[];
-    videoReferences: ReferenceVideo[];
-    audioReferences: ReferenceAudio[];
-    durationMs: number;
-    status: GenerationLog["status"];
-    idempotencyKey?: string;
-    task?: VideoGenerationTask;
-    video?: GeneratedVideo;
-    error?: string;
-}): GenerationLog {
+function buildLog({ prompt, model, config, references, videoReferences, audioReferences, durationMs, status, task, video, error }: { prompt: string; model: string; config: AiConfig; references: ReferenceImage[]; videoReferences: ReferenceVideo[]; audioReferences: ReferenceAudio[]; durationMs: number; status: GenerationLog["status"]; task?: VideoGenerationTask; video?: GeneratedVideo; error?: string }): GenerationLog {
     const logConfig = {
         model: config.model,
         videoModel: config.videoModel,
@@ -1095,14 +890,13 @@ function buildLog({
         videoSeconds: config.videoSeconds,
         videoGenerateAudio: config.videoGenerateAudio,
         videoWatermark: config.videoWatermark,
-        videoReferenceMode: normalizeVideoReferenceMode(config.videoReferenceMode),
     };
     return {
         id: nanoid(),
         createdAt: Date.now(),
-        title: prompt.slice(0, 12) || "未命名",
+        title: prompt.slice(0, 12) || i18n.t("workbench.untitled"),
         prompt,
-        time: new Date().toLocaleString("zh-CN", { hour12: false }),
+        time: new Date().toLocaleString(i18n.resolvedLanguage, { hour12: false }),
         model,
         config: logConfig,
         references,
@@ -1113,7 +907,6 @@ function buildLog({
         resolution: logConfig.vquality,
         seconds: logConfig.videoSeconds,
         status,
-        idempotencyKey,
         task,
         video,
         error,
@@ -1131,7 +924,6 @@ function buildVideoConfig(config: AiConfig, model: string): AiConfig {
         vquality: normalizeResolution(config.vquality),
         videoGenerateAudio: String(boolConfig(config.videoGenerateAudio, true)),
         videoWatermark: String(boolConfig(config.videoWatermark, false)),
-        videoReferenceMode: normalizeVideoReferenceMode(config.videoReferenceMode),
     };
 }
 
@@ -1147,4 +939,8 @@ function normalizeVideoSize(value: string) {
 
 function normalizeResolution(value: string) {
     return normalizeVideoResolutionValue(value);
+}
+
+function delay(ms: number) {
+    return new Promise((resolve) => setTimeout(resolve, ms));
 }

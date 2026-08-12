@@ -1,28 +1,30 @@
 ---
-title: 待测试
-description: 当前版本已实现但仍需人工验证的变更项
+title: Pending Tests
+description: Implemented changes that still need manual verification
 ---
 
-# 待测试
+# Pending Tests
 
-- 画布生图/视频：画布节点和配置节点生成时以当前选择的模型为准，并同步到对应生图/视频/文本/音频字段；需验证选择 `seedance-2.0` 时请求模型不再被浏览器历史保存的其他视频模型覆盖。
-- 视频生成兼容：视频工作台和画布已按模型适配 Seedance 标准/按秒、Grok、Omni、Sora、Veo 的中转协议；Seedance 按秒模型隐藏无效的声音/水印开关，标准模型保留声音开关，旧火山接口继续保留声音和水印。模拟链路已通过，仍需按生产已配置模型逐项验证文生视频、图生视频和支持的参考素材组合。
-- 视频长任务：创建后保存公开任务 ID 和幂等键，刷新或短暂查询失败后可继续轮询原任务；本地模拟已确认只创建一次任务，后续只执行 GET 查询，仍需生产验证失败不扣费、成功只扣费一次。
-- 视频媒体地址：`image.52token.org` 只用于工作台和生成 API，工作台只接受 `https://video.52token.org/v1/video-content/*` 作为生成结果代理地址，并在浏览器本地保存 Blob；本地同域下载已通过，仍需验证浏览器 Network、页面、下载文件和错误提示均只显示平台代理 URL。
-- 52Token 生图工作台：默认渠道改为 `https://image.52token.org`，预置 Image2 OpenAI 调用格式和 Gemini banana 调用格式，需验证用户填写分组 Key 后可直接生图。
-- OpenAI 兼容生图：接口模式只保留同步和异步，默认同步；历史 `auto` 配置和旧生成记录统一迁移为同步。同步失败直接返回错误，不再自动改为异步重新提交；同步响应若已经返回任务 ID，则只轮询该任务。手动异步仍只创建一次带幂等键的任务并轮询结果。渠道 Base URL、API Key 或调用格式变化时立即清空旧模型列表，重新拉取后动态使用新模型名。请求继续调用 `image.52token.org` 并原样传递所选模型、尺寸和质量；结果只接受 data URL 或 `https://video.52token.org/v1/image-content/*` 代理地址，下载后保存到浏览器 IndexedDB 并使用本地 Blob 预览。类型检查、构建和本地同步/异步/失败不重提回归已通过，仍需用生产备用分组做最终真实生图确认。
-- 批量生图：新增并发限制，默认并发 5、最高 10；需验证批量生成不会一次性打满所有请求，失败项只在用户手动重试时重新创建任务。
-- Docker 部署：Compose 默认绑定 `127.0.0.1:15731`，需配合 Nginx 根路径反代，同时确认 `/v1/images/*` 和 `/v1beta/models/*` 仍由 sub2api 处理。
-- 提示词库：新增 `xianyu110/awesome-gptimage2` 来源，加载结果会过滤空提示词、无图和重复条目，需验证提示词中心和画布内提示词弹窗分页滚动正常。
-- Codex App 插件文档：新增插件安装教程，区分 AI 自动安装、手动安装和本仓库开发调试安装；同步优化插件 README 与技能说明。
-- 配置与用户偏好：每个模型渠道新增 OpenAI / Gemini 调用格式选择，默认 OpenAI，切换默认格式时同步更新默认 Base URL；渠道 Tab 增加紧凑醒目的提醒，说明模型是否可选需要到“模型”Tab 选择。
-- Gemini 调用格式：支持拉取 Gemini 模型列表，并用于文本问答、在线 Agent 工具调用、基础生图和图生图请求。
-- 音频和视频生成：选择 Gemini 调用格式时先给出不支持提示，仍需使用 OpenAI 兼容渠道。
-- WebDAV 同步：移除 Next.js 转发代理和连接方式选择，改为浏览器前端直接连接 WebDAV 服务。
-- 提示词库：移除 Next.js route 抓取和服务端内存缓存，改为浏览器前端直连 GitHub 原始文件并缓存到 IndexedDB。
-- 提示词库：移除已 404 的 `EvoLinkAI/awesome-gpt-image-2-API-and-Prompts` 来源。
-- 前端构建：移除 Next.js，改为 Vite + React Router，并将前端目录调整为 `pages` / `components` / `stores` / `lib` / `layouts` / `styles`，需验证首页、图片/视频工作台、素材、提示词库和画布路由跳转。
-- 前端构建：修复 TypeScript 严格检查下的构建报错。
-- Vercel 部署：新增 `web` 和 `docs` 两个子项目的 Vercel 配置，需分别验证静态前端和文档站部署。
-- Docker 部署：运行镜像从 Node serve 改为 nginx 静态托管，需验证前端路由刷新回退。
-- 环境变量：移除过期的后端 `.env.example` 示例文件。
+The current release needs manual verification in these areas:
+
+- Canvas navigation: the bottom toolbar should switch between Select and Move modes and reflect the active mode with its icon; Select should draw a clearly spaced dashed range whose dash length, gap, and stroke width remain visually constant at every zoom level, while Move should pan from either the background or a node. Clicking blank canvas space in either mode should deselect the current node and close its top toolbar and lower prompt panel. Holding Control or Space should temporarily invert the active tool without changing the toolbar mode: Select becomes Move, and Move becomes range selection. After clicking any canvas-page button, pressing Space should only invert the tool and must not trigger that button again. Middle-button panning and additive node selection with Shift/Cmd should continue to work, while Space remains available inside text inputs and editable content.
+- English and Simplified Chinese switching across navigation, settings, titles, descriptions, Ant Design components, and persisted preferences.
+- Global Dropdown, Menu, Select, Cascader, and TreeSelect popup backgrounds, hover states, and selected states in both light and dark themes.
+- Canvas node resize stability, prompt scrolling, generated-prompt restoration, edit-prompt persistence after closing an existing image or text node panel, expanded prompt editing with live synchronization and `@` references, image editing, drag-and-drop references, and generation configuration.
+- Canvas side panel: clicking an element row should smoothly center and select its node without zooming above 100%; image elements with content should still open the large preview without triggering canvas focus.
+- Multi-image canvas generation: starting N images should immediately create one image node with N expandable slots and one incoming connection; each empty slot should independently show generating or failure while requests are running, every slot with image content should always display that image, and the first successful image should appear as the primary image immediately. The collapsed state should use a compact stack with at most three closely spaced backplates and a clearly legible count control; clicking the control should hide the floating toolbar and expand the slots upward and to the right. Every completed secondary image should keep a clearly legible primary-image action visible in both themes, and clicking the empty canvas should collapse the group.
+- Multi-image primary selection: choosing another primary image should preserve the node center and current maximum edge while adapting to the new image ratio; free-resize nodes should keep their exact dimensions, and the viewport zoom indicator must not change.
+- Failed multi-image slots: every failed slot, including the current primary slot, should expose retry and delete actions. Retry should update only that slot without replacing an existing successful primary image; delete should remove only that failed slot and update the displayed count.
+- Multi-image resize: starting a resize while child images are expanded should collapse the group once, then resize the root node normally without triggering nested React updates or an application error.
+- Multi-image alternatives: expanded images should use up to four columns so larger batches stay compact; every completed image, including the primary image, should provide an independent download action, while alternatives should also keep clearly legible create-copy and set-primary actions in both themes. Create-copy should add an independent image node to the right of the group, select it, and leave the original image group unchanged.
+- Canvas Agent startup, MCP status, model and permission controls, approvals, version reporting, diagnostics, streaming responses, history consistency, multi-tab isolation, and local Skill management.
+- Agent header tabs in English and Chinese at different panel widths; labels should collapse to icons and counts before either edge is clipped.
+- Agent message layout, Markdown, code blocks, attachments, token statistics, progress timelines, command groups, and scroll-follow behavior.
+- Agent inline references: type `/` to select an enabled Skill or `@` to select a canvas asset at the caret; tokens should remain aligned with text, support keyboard navigation and hover previews, and preserve their positions after sending or refreshing.
+- Agent message metadata: image attachments, Skills, canvas references, and local previews should survive page refreshes and Agent restarts through exact `clientMessageId`, `threadId`, and `turnId` ownership; protocol upgrades must not reset the independent storage format, unknown or damaged storage must refuse writes without overwriting files, no records may be silently pruned by count or size, and deleting a thread should remove its metadata and preview assets without relying on browser IndexedDB or text matching.
+- Prompt Center layout, source synchronization, search, asset insertion, prompt detail dialogs, and compact split-layout prompt pickers in the image and video workbenches.
+- Workbench history image cleanup: after generating content in the image or video workbench, deleting an asset, canvas image node, canvas content, or canvas project must not remove thumbnails, results, or references from generation history; deleting a generation record should still remove its dedicated local files.
+- Settings import/export, Volcengine Ark protocol handling, and WebDAV-related configuration.
+- Local storage settings: the Settings page should provide a Local storage tab that reads only the `infinite-canvas` database and shows IndexedDB usage, total site usage, browser quota, quota percentage, and per-object-store record counts and content size; refreshing after local data changes should update the figures without blocking the rest of the page.
+
+The Chinese version contains the complete item-by-item acceptance checklist.
