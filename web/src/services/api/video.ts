@@ -7,12 +7,16 @@ import {
     boolConfig,
     buildSeedancePromptText,
     isArkPlanBaseUrl,
+    isMinimaxH3VideoModel,
     isSeedancePerSecondModel,
     isSeedanceVideoModel,
     normalizeSeedanceDuration,
     normalizeSeedanceRatio,
     normalizeSeedanceResolution,
+    normalizeMinimaxH3Duration,
+    normalizeMinimaxH3Ratio,
     normalizeVideoReferenceMode,
+    minimaxH3VideoReferenceError,
     seedanceFixedResolution,
     seedanceVideoReferenceError,
     SEEDANCE_REFERENCE_LIMITS,
@@ -83,6 +87,7 @@ export class VideoGenerationPollingPausedError extends Error {
 
 export function videoReferenceLimits(model: string, referenceMode = "auto"): VideoReferenceLimits {
     const value = modelOptionName(model).toLowerCase();
+    if (isMinimaxH3VideoModel(value)) return normalizeVideoReferenceMode(referenceMode) === "frames" ? { images: 2, videos: 0, audios: 0 } : { images: 5, videos: 0, audios: 3 };
     if (normalizeVideoReferenceMode(referenceMode) === "frames" && (isSeedanceVideoModel(value) || value.includes("omni-fast"))) return { images: 2, videos: 0, audios: 0 };
     if (value.includes("grok") && value.includes("1.5")) return { images: 1, videos: 0, audios: 0 };
     if (value.includes("grok")) return { images: 7, videos: 1, audios: 0 };
@@ -165,7 +170,14 @@ async function createPluginVideoTask(config: AiConfig, model: string, script: st
         config,
         prompt,
         images,
-        params: { seconds: normalizeVideoSeconds(config.videoSeconds), size: normalizeVideoSize(config.size), resolution: normalizeVideoResolution(config.vquality), ratio: config.size, generateAudio: boolConfig(config.videoGenerateAudio, true), watermark: boolConfig(config.videoWatermark, false) },
+        params: {
+            seconds: normalizeVideoSeconds(config.videoSeconds),
+            size: normalizeVideoSize(config.size),
+            resolution: normalizeVideoResolution(config.vquality),
+            ratio: config.size,
+            generateAudio: boolConfig(config.videoGenerateAudio, true),
+            watermark: boolConfig(config.videoWatermark, false),
+        },
         signal: options?.signal,
     });
     const result = await materializePluginVideoResult(pluginVideoResult(raw), config, options);
@@ -229,7 +241,7 @@ export async function storeGeneratedVideo(result: VideoGenerationResult): Promis
 
 type OpenAIVideoAdapter = {
     kind: "videos-json" | "video-generations-json" | "legacy-multipart";
-    payloadBuilder: "seedance-flat" | "grok" | "omni-frame" | "omni-v2v" | "sora2" | "veo" | "generic";
+    payloadBuilder: "seedance-flat" | "minimax-h3" | "grok" | "omni-frame" | "omni-v2v" | "sora2" | "veo" | "generic";
     label: string;
     createPath: string;
     statusPathBase: string;
@@ -240,6 +252,7 @@ type OpenAIVideoAdapter = {
 
 function openAIVideoAdapter(model: string): OpenAIVideoAdapter {
     const value = model.toLowerCase();
+    if (isMinimaxH3VideoModel(value)) return openAIVideosAdapter("minimax-h3", "MiniMax H3 视频", 1440);
     if (isSeedanceVideoModel(value)) return openAIVideosAdapter("seedance-flat", "Seedance 视频");
     if (value.includes("grok") && (value.includes("video") || value.includes("vedio"))) {
         return openAIVideosAdapter("grok", "Grok 视频");
@@ -263,7 +276,7 @@ function openAIVideoAdapter(model: string): OpenAIVideoAdapter {
     };
 }
 
-function openAIVideosAdapter(payloadBuilder: OpenAIVideoAdapter["payloadBuilder"], label: string): OpenAIVideoAdapter {
+function openAIVideosAdapter(payloadBuilder: OpenAIVideoAdapter["payloadBuilder"], label: string, maxAttempts = OPENAI_VIDEO_MAX_ATTEMPTS): OpenAIVideoAdapter {
     return {
         kind: "videos-json",
         payloadBuilder,
@@ -272,7 +285,7 @@ function openAIVideosAdapter(payloadBuilder: OpenAIVideoAdapter["payloadBuilder"
         statusPathBase: "/videos",
         contentPathBase: "/videos",
         pollDelayMs: OPENAI_VIDEO_POLL_DELAY_MS,
-        maxAttempts: OPENAI_VIDEO_MAX_ATTEMPTS,
+        maxAttempts,
     };
 }
 
@@ -356,7 +369,7 @@ async function buildOpenAIVideoPayload(config: AiConfig, model: string, prompt: 
     const imageUrls = await Promise.all(references.map((image) => resolveSeedanceImageUrl(config, image)));
     const requiresHttpsReferenceMedia = adapter.payloadBuilder === "seedance-flat" || adapter.payloadBuilder === "grok";
     const videoUrls = await Promise.all(videoReferences.map((video) => resolveSeedanceVideoUrl(video, requiresHttpsReferenceMedia)));
-    const audioUrls = await Promise.all(audioReferences.map((audio) => resolveSeedanceAudioUrl(audio, requiresHttpsReferenceMedia)));
+    const audioUrls = await Promise.all(audioReferences.map((audio) => resolveSeedanceAudioUrl(audio, requiresHttpsReferenceMedia || adapter.payloadBuilder === "minimax-h3")));
     const aspectRatio = normalizeOpenAIVideoAspectRatio(config.size);
     const resolution = normalizeOpenAIVideoResolution(config.vquality, requestModel);
     const seconds = Number(normalizeVideoSeconds(config.videoSeconds));
@@ -369,6 +382,32 @@ async function buildOpenAIVideoPayload(config: AiConfig, model: string, prompt: 
     if (aspectRatio) payload.aspect_ratio = aspectRatio;
 
     switch (adapter.payloadBuilder) {
+        case "minimax-h3": {
+            if (videoUrls.length) throw new Error("MiniMax H3 不支持参考视频");
+            const h3ReferenceMode = normalizeVideoReferenceMode(config.videoReferenceMode);
+            const h3ReferenceError = minimaxH3VideoReferenceError(references, videoReferences, audioReferences, h3ReferenceMode, boolConfig(config.videoGenerateAudio, true));
+            if (h3ReferenceError) throw new Error(h3ReferenceError);
+            if (h3ReferenceMode === "frames") {
+                if (imageUrls.length !== 2) throw new Error("MiniMax H3 首尾帧模式需要正好 2 张参考图");
+                if (audioUrls.length) throw new Error("MiniMax H3 首尾帧模式不支持参考音频");
+                payload.first_image_url = imageUrls[0];
+                payload.last_image_url = imageUrls[1];
+                payload.duration = normalizeMinimaxH3Duration(config.videoSeconds);
+                payload.resolution = "2k";
+                payload.audio = false;
+                return payload;
+            }
+            assertReferenceLimit(imageUrls, 5, "参考图");
+            assertReferenceLimit(audioUrls, 3, "参考音频");
+            if (audioUrls.length && !imageUrls.length) throw new Error("MiniMax H3 参考音频需要至少 1 张参考图");
+            if (imageUrls.length) payload.reference_image_urls = imageUrls;
+            if (audioUrls.length) payload.reference_audios = audioUrls;
+            payload.duration = normalizeMinimaxH3Duration(config.videoSeconds);
+            payload.aspect_ratio = normalizeMinimaxH3Ratio(aspectRatio);
+            payload.resolution = "2k";
+            payload.audio = boolConfig(config.videoGenerateAudio, true);
+            return payload;
+        }
         case "seedance-flat": {
             if (referenceMode === "frames") {
                 if (imageUrls.length !== 2 || videoUrls.length || audioUrls.length) throw new Error("Seedance 首尾帧模式需要且只能使用 2 张参考图，不能同时添加参考视频或音频");

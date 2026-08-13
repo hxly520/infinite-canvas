@@ -19,17 +19,21 @@ export const seedanceResolutionOptions = [
     { value: "1080p", label: "1080p" },
 ] as const;
 
-export const seedanceRatioOptions = [
-    { value: "16:9" },
-    { value: "9:16" },
-    { value: "1:1" },
-    { value: "4:3" },
-    { value: "3:4" },
-    { value: "21:9" },
-    { value: "adaptive" },
-] as const;
+export const seedanceRatioOptions = [{ value: "16:9" }, { value: "9:16" }, { value: "1:1" }, { value: "4:3" }, { value: "3:4" }, { value: "21:9" }, { value: "adaptive" }] as const;
 
 export const seedanceDurationOptions = [-1, 4, 5, 6, 8, 10, 12, 15] as const;
+export const minimaxH3ResolutionOptions = [{ value: "2k", label: "2K" }] as const;
+export const minimaxH3RatioOptions = ["16:9", "9:16", "1:1", "21:9", "3:4", "4:3"] as const;
+export const minimaxH3DurationOptions = [5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15] as const;
+export const MINIMAX_H3_REFERENCE_LIMITS = {
+    images: 5,
+    videos: 0,
+    audios: 3,
+    imageMaxBytes: 25 * 1024 * 1024,
+    videoMaxBytes: 0,
+    audioMaxBytes: 15 * 1024 * 1024,
+    totalAudioDurationMs: 15000,
+} as const;
 export type VideoReferenceMode = "auto" | "frames";
 
 const seedancePixels = {
@@ -67,6 +71,39 @@ export function isSeedanceVideoConfig(config: AiConfig | Pick<AiConfig, "model" 
 export function isSeedanceVideoModel(model: string) {
     const value = model.toLowerCase();
     return value.includes("seedance") || value.includes("doubao-seedance");
+}
+
+export function isMinimaxH3VideoModel(model: string) {
+    const value = modelOptionName(model).toLowerCase();
+    return value.includes("minimax-h3") || value.includes("minimax_h3") || value === "h3-2k";
+}
+
+export function normalizeMinimaxH3Resolution(_value: string) {
+    return "2k";
+}
+
+export function normalizeMinimaxH3Duration(value: string) {
+    const seconds = Math.floor(Number(value) || 8);
+    return Math.max(5, Math.min(15, seconds));
+}
+
+export function normalizeMinimaxH3Ratio(value: string) {
+    return minimaxH3RatioOptions.includes(value as (typeof minimaxH3RatioOptions)[number]) ? value : "16:9";
+}
+
+export function minimaxH3VideoReferenceError(images: ReferenceImage[], videos: ReferenceVideo[], audios: ReferenceAudio[], referenceMode: VideoReferenceMode, _generateAudio = true) {
+    if (videos.length) return "MiniMax H3 不支持参考视频";
+    if (images.length > MINIMAX_H3_REFERENCE_LIMITS.images) return "MiniMax H3 最多支持 5 张参考图";
+    if (audios.length > MINIMAX_H3_REFERENCE_LIMITS.audios) return "MiniMax H3 最多支持 3 段参考音频";
+    const totalAudioDurationMs = audios.reduce((total, audio) => total + (audio.durationMs || 0), 0);
+    if (totalAudioDurationMs > MINIMAX_H3_REFERENCE_LIMITS.totalAudioDurationMs) return "MiniMax H3 参考音频总时长不能超过 15 秒";
+    if (referenceMode === "frames") {
+        if (images.length !== 2) return "MiniMax H3 首尾帧模式需要正好 2 张参考图";
+        if (audios.length) return "MiniMax H3 首尾帧模式不支持参考音频";
+        return "";
+    }
+    if (audios.length && !images.length) return "MiniMax H3 参考音频需要至少 1 张参考图";
+    return "";
 }
 
 export function isArkPlanBaseUrl(baseUrl: string) {
@@ -153,11 +190,7 @@ export function seedanceReferenceLabel(kind: "image" | "video" | "audio", index:
 }
 
 export function buildSeedancePromptText(prompt: string, images: ReferenceImage[], videos: ReferenceVideo[], audios: ReferenceAudio[]) {
-    const labels = [
-        ...images.map((_, index) => seedanceReferenceLabel("image", index)),
-        ...videos.map((_, index) => seedanceReferenceLabel("video", index)),
-        ...audios.map((_, index) => seedanceReferenceLabel("audio", index)),
-    ];
+    const labels = [...images.map((_, index) => seedanceReferenceLabel("image", index)), ...videos.map((_, index) => seedanceReferenceLabel("video", index)), ...audios.map((_, index) => seedanceReferenceLabel("audio", index))];
     const text = prompt.trim();
     if (!labels.length) return text;
     return i18n.t("seedance.promptPrefix", { labels: labels.join(i18n.t("seedance.separator")), prompt: text });

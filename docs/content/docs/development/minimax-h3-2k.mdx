@@ -1,0 +1,29 @@
+---
+title: MiniMax H3 2K
+description: Private workbench protocol compatibility for minimax-h3-2k
+---
+
+# MiniMax H3 2K
+
+The private video workbench supports `minimax-h3-2k` through the OpenAI-compatible asynchronous video API exposed by the model catalog.
+
+## Request flow
+
+1. `POST /v1/videos` creates one task.
+2. `GET /v1/videos/{task_id}` is polled every five seconds.
+3. `GET /v1/videos/{task_id}/content` downloads the completed media, unless the gateway returns an allow-listed `video_url`.
+
+## Model profile
+
+- Resolution is fixed to `2k`.
+- Duration is an integer from 5 through 15 seconds.
+- Ratios are `16:9`, `9:16`, `1:1`, `21:9`, `3:4`, and `4:3`.
+- The model is classified as `video` during model discovery and uses the advanced video controls.
+
+## References
+
+Multimodal mode accepts up to five PNG/JPEG/WebP images and up to three HTTPS audio URLs. Each image is limited to 25 MB; each audio file is limited to 15 MB and the combined audio duration is limited to 15 seconds. Reference videos are rejected before submission.
+
+Frame mode requires exactly two images and sends `first_image_url` and `last_image_url`. Frame mode is mutually exclusive with reference audio and native generated audio.
+
+The adapter uses the same idempotency, resumable polling, allow-listed download, and local Blob verification path as the existing OpenAI video adapters. It does not use the Ark/Seedance adapter and does not retry task creation.
