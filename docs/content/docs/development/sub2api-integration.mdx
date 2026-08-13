@@ -100,6 +100,8 @@ GET  /v1/videos/{task_id}
 GET  /v1/videos/{task_id}/content
 ```
 
+所有 OpenAI 兼容视频模型（包括未知模型名）都从这组三个路径进入；模型名只决定前端参数校验和字段归一化，不再回退到旧的通用 multipart 创建协议。参考素材优先使用统一 JSON 字段 `reference_image_urls`、`reference_videos`、`reference_audios`。服务端仍兼容 `image_url`、`image_urls`、`images`、`video_url` 等历史别名，但工作台不主动生成这些别名。
+
 工作流：
 
 1. `createVideoGenerationTask` 根据当前节点模型和模型级配置选择适配器。
@@ -128,6 +130,7 @@ GET  /v1/videos/{task_id}/content
 | --- | ---: | ---: | ---: | --- |
 | Seedance 标准 | 4 | 3 | 1 | 参考视频/音频需至少一张图；首尾帧必须成对且不能混用其他素材 |
 | Seedance 固定分辨率 | 9 | 3 | 3 | 时长必填；模型后缀决定分辨率；其他规则同标准模型 |
+| MiniMax H3 2K | 5 | 0 | 3 | 固定 `2k`；时长 5-15 秒；音频总时长不超过 15 秒；首尾帧需正好两张图且不能混用音频 |
 | Grok | 7 | 1 | 0 | 不支持首尾帧；Grok 1.5 单独要求恰好一张图 |
 | Omni Fast | 5 | 0 | 0 | 多图使用 multipart；首尾帧模式最多两张 |
 | Omni V2V | 0 | 1 | 0 | 必须一个视频且不超过 5MB |

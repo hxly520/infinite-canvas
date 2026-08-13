@@ -24,6 +24,6 @@ The private video workbench supports `minimax-h3-2k` through the OpenAI-compatib
 
 Multimodal mode accepts up to five PNG/JPEG/WebP images and up to three HTTPS audio URLs. Each image is limited to 25 MB; each audio file is limited to 15 MB and the combined audio duration is limited to 15 seconds. Reference videos are rejected before submission.
 
-Frame mode requires exactly two images and sends `first_image_url` and `last_image_url`. Frame mode is mutually exclusive with reference audio and native generated audio.
+Frame mode requires exactly two images and sends `first_image_url` and `last_image_url`. Frame mode is mutually exclusive with reference audio and native generated audio. In normal multimodal mode the workbench sends `reference_image_urls` and `reference_audios` in the same JSON `/v1/videos` request.
 
 The adapter uses the same idempotency, resumable polling, allow-listed download, and local Blob verification path as the existing OpenAI video adapters. It does not use the Ark/Seedance adapter and does not retry task creation.

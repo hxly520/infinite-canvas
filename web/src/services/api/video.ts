@@ -240,7 +240,6 @@ export async function storeGeneratedVideo(result: VideoGenerationResult): Promis
 }
 
 type OpenAIVideoAdapter = {
-    kind: "videos-json" | "video-generations-json" | "legacy-multipart";
     payloadBuilder: "seedance-flat" | "minimax-h3" | "grok" | "omni-frame" | "omni-v2v" | "sora2" | "veo" | "generic";
     label: string;
     createPath: string;
@@ -264,21 +263,14 @@ function openAIVideoAdapter(model: string): OpenAIVideoAdapter {
     if (value.includes("video") || value.includes("vedio") || value.includes("kling") || value.includes("wan") || value.includes("hailuo")) {
         return openAIVideosAdapter("generic", "视频");
     }
-    return {
-        kind: "legacy-multipart",
-        payloadBuilder: "generic",
-        label: "视频",
-        createPath: "/videos",
-        statusPathBase: "/videos",
-        contentPathBase: "/videos",
-        pollDelayMs: OPENAI_VIDEO_POLL_DELAY_MS,
-        maxAttempts: OPENAI_VIDEO_MAX_ATTEMPTS,
-    };
+    // The model catalog exposes all OpenAI-compatible video models through the
+    // same JSON /v1/videos contract. Keep unknown names on that contract too;
+    // model-specific aliases remain in the payload builders above.
+    return openAIVideosAdapter("generic", "视频");
 }
 
 function openAIVideosAdapter(payloadBuilder: OpenAIVideoAdapter["payloadBuilder"], label: string, maxAttempts = OPENAI_VIDEO_MAX_ATTEMPTS): OpenAIVideoAdapter {
     return {
-        kind: "videos-json",
         payloadBuilder,
         label,
         createPath: "/videos",
@@ -297,35 +289,7 @@ async function createOpenAIVideoTask(config: AiConfig, model: string, prompt: st
     if (adapter.payloadBuilder === "omni-v2v" && videoReferences.length === 1 && !isPublicMediaUrl(videoReferences[0].url)) {
         return createOpenAIVideoMultipartTask(config, model, prompt, references, videoReferences, audioReferences, adapter, options);
     }
-    if (adapter.kind !== "legacy-multipart") {
-        return createOpenAIVideoJSONTask(config, model, prompt, references, videoReferences, audioReferences, adapter, options);
-    }
-    if (videoReferences.length || audioReferences.length) {
-        throw new Error("当前通用视频接口不支持参考视频或参考音频，请切换到 Seedance / Omni / Grok 视频模型，或移除参考素材");
-    }
-    const body = new FormData();
-    body.append("model", modelOptionName(model));
-    body.append("prompt", prompt);
-    body.append("seconds", normalizeVideoSeconds(config.videoSeconds));
-    if (normalizeVideoSize(config.size)) body.append("size", normalizeVideoSize(config.size)!);
-    body.append("resolution_name", normalizeVideoResolution(config.vquality));
-    body.append("preset", "normal");
-    const files = await Promise.all(references.slice(0, 7).map(async (image) => dataUrlToFile({ ...image, dataUrl: await imageToDataUrl(image) })));
-    files.forEach((file) => body.append("input_reference[]", file));
-    try {
-        const created = unwrapVideoResponse(
-            (
-                await axios.post<ApiVideoResponse>(aiApiUrl(config, "/videos"), body, {
-                    headers: aiHeaders(config, undefined, { "Idempotency-Key": options?.idempotencyKey || createVideoGenerationIdempotencyKey() }),
-                    signal: options?.signal,
-                })
-            ).data,
-        );
-        return openAIVideoTaskFromCreateResponse(config, created, { model, statusPathBase: "/videos", contentPathBase: "/videos", pollDelayMs: OPENAI_VIDEO_POLL_DELAY_MS, maxAttempts: OPENAI_VIDEO_MAX_ATTEMPTS }, options);
-    } catch (error) {
-        if (error instanceof VideoGenerationTerminalError) throw error;
-        throw new Error(readAxiosError(error, "视频任务创建失败"));
-    }
+    return createOpenAIVideoJSONTask(config, model, prompt, references, videoReferences, audioReferences, adapter, options);
 }
 
 async function createOpenAIVideoMultipartTask(config: AiConfig, model: string, prompt: string, references: ReferenceImage[], videoReferences: ReferenceVideo[], audioReferences: ReferenceAudio[], adapter: OpenAIVideoAdapter, options?: RequestOptions) {
@@ -432,7 +396,7 @@ async function buildOpenAIVideoPayload(config: AiConfig, model: string, prompt: 
                 payload.first_image_url = imageUrls[0];
                 payload.last_image_url = imageUrls[1];
             } else {
-                applySeedanceImageReferences(payload, imageUrls);
+                applyImageReferences(payload, imageUrls);
                 if (videoUrls.length) payload.reference_videos = videoUrls;
                 if (audioUrls.length) payload.reference_audios = audioUrls;
             }
@@ -450,16 +414,16 @@ async function buildOpenAIVideoPayload(config: AiConfig, model: string, prompt: 
                 assertReferenceLimit(videoUrls, 1, "参考视频");
             }
             const duration = normalizeAllowedDuration(seconds, [4, 6, 8, 10, 12, 15], 6);
-            payload.seconds = imageUrls.length > 1 ? Math.min(duration, 10) : duration;
+            payload.duration = imageUrls.length > 1 ? Math.min(duration, 10) : duration;
             payload.resolution = resolution === "480p" ? "480p" : "720p";
-            if (imageUrls.length) payload.image_urls = imageUrls;
-            if (videoUrls.length) payload.video_url = videoUrls[0];
+            if (imageUrls.length) payload.reference_image_urls = imageUrls;
+            if (videoUrls.length) payload.reference_videos = videoUrls;
             return payload;
         }
         case "omni-v2v": {
             if (imageUrls.length || audioUrls.length) throw new Error("Omni V2V 仅支持 1 个参考视频，请移除参考图或参考音频");
             if (videoUrls.length !== 1) throw new Error("Omni V2V 需要且只能使用 1 个参考视频");
-            payload.video_url = videoUrls[0];
+            payload.reference_videos = videoUrls;
             payload.aspect_ratio = normalizeTwoWayAspectRatio(aspectRatio);
             return payload;
         }
@@ -486,7 +450,7 @@ async function buildOpenAIVideoPayload(config: AiConfig, model: string, prompt: 
             payload.generate_audio = boolConfig(config.videoGenerateAudio, true);
             if (imageUrls.length) {
                 payload.reference_mode = "frame";
-                payload.images = imageUrls;
+                payload.reference_image_urls = imageUrls;
             }
             return payload;
         }
@@ -500,12 +464,11 @@ async function buildOpenAIVideoPayload(config: AiConfig, model: string, prompt: 
             payload.generate_audio = boolConfig(config.videoGenerateAudio, true);
             if (imageUrls.length) {
                 payload.reference_mode = veoReferenceMode;
-                payload.images = imageUrls;
+                payload.reference_image_urls = imageUrls;
             }
             return payload;
         }
         default: {
-            payload.seconds = seconds;
             payload.duration = seconds;
             payload.resolution = resolution;
             applyImageReferences(payload, imageUrls);
@@ -648,16 +611,9 @@ async function pollSeedanceTask(config: AiConfig, task: VideoGenerationTask, opt
     }
 }
 
-function applySeedanceImageReferences(payload: Record<string, unknown>, imageUrls: string[]) {
-    if (!imageUrls.length) return;
-    payload.image_url = imageUrls[0];
-    if (imageUrls.length > 1) payload.reference_image_urls = imageUrls.slice(1);
-}
-
 function applyImageReferences(payload: Record<string, unknown>, imageUrls: string[]) {
     if (!imageUrls.length) return;
-    if (imageUrls.length === 1) payload.image_url = imageUrls[0];
-    else payload.image_urls = imageUrls;
+    payload.reference_image_urls = imageUrls;
 }
 
 function assertReferenceLimit(items: unknown[], limit: number, label: string) {
