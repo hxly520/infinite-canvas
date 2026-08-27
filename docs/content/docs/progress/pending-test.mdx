@@ -10,6 +10,7 @@ description: Implemented changes that still need manual verification
 - Verify the version modal reads `VERSION` and `CHANGELOG.md` from the private `hxly520/infinite-canvas` mainline; the plugin registry remains on the official `basketikun/infinite-canvas@plugins-dist`, and Canvas Agent's official NPM version check is unchanged.
 - Verify legacy batch-image canvases migrate to one multi-image node without losing the primary image or external connections.
 - Verify 52Token Image2 sync/manual-async generation, editing, managed media download, and local persistence.
+- Verify backup OpenAI Images async generation/editing polls every five seconds for at least 30 minutes, always reuses the original task ID, and leaves the primary Image2 request contract unchanged.
 - Verify Seedance, Grok, Omni, Sora, and Veo create/poll/resume flows create each paid task only once.
 - Verify the unified JSON video contract sends one `POST /v1/videos` for Seedance, Grok, Omni, Sora, Veo, unknown video models, and `minimax-h3-2k`; subsequent requests are only task polling or content download. Confirm standard `reference_*` fields and paired first/last-frame behavior.
 - Verify seven official Image Prompts sources plus the private `xianyu110/awesome-gptimage2` dynamic source remain independently configurable; the private nested feed must still filter empty, image-less, and duplicate entries.

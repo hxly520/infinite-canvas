@@ -75,6 +75,9 @@ AI 配置持久化在浏览器本地。前端不能把 API Key 写进仓库、�
 4. 固定清晰度模型传 `image_size` 和可选 `aspect_ratio`；普通模型传 `size`、`quality` 和 `response_format`。
 5. 解析器兼容 `data`、`images`、`output`、`results` 以及嵌套 `result/response`，支持 URL、base64 和常见字段别名。
 6. 平台 URL 必须是允许的媒体代理路径；外部图片 URL不能作为静默回退。
+7. 备用 OpenAI Images 异步任务默认每 5 秒查询一次，客户端等待窗口至少 30 分钟；查询只复用创建响应里的任务 ID，不得因暂时排队或查询失败重新创建收费任务。
+
+`52token-image2 / gpt-image-2` 主生图仍沿用原有同步或用户手动选择异步的调用链。本节的统一异步等待策略只影响备用 OpenAI Images 渠道，不改变主生图端点、字段和调度方式。URL 或 data URI 参考素材可由平台兼容层归一化；浏览器本地文件和蒙版继续使用 `POST /v1/images/edits` multipart 上传。
 
 ### 3.2 Gemini native 生图
 

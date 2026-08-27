@@ -127,8 +127,8 @@ export const defaultConfig: AiConfig = {
     canvasImageCount: "3",
     imageDispatchMode: "sync",
     imageResponseFormat: "b64_json",
-    imagePollIntervalMs: "2500",
-    imagePollTimeoutMs: "600000",
+    imagePollIntervalMs: "5000",
+    imagePollTimeoutMs: "1800000",
     imageConcurrency: "5",
     videoReferenceMode: "auto",
 };
@@ -271,8 +271,8 @@ export const useConfigStore = create<ConfigStore>()(
                         canvasImageCount: config.canvasImageCount || "3",
                         imageDispatchMode: normalizeImageDispatchMode(config.imageDispatchMode),
                         imageResponseFormat: normalizeImageResponseFormat(config.imageResponseFormat),
-                        imagePollIntervalMs: config.imagePollIntervalMs || defaultConfig.imagePollIntervalMs,
-                        imagePollTimeoutMs: config.imagePollTimeoutMs || defaultConfig.imagePollTimeoutMs,
+                        imagePollIntervalMs: migrateImagePollInterval(config.imagePollIntervalMs),
+                        imagePollTimeoutMs: migrateImagePollTimeout(config.imagePollTimeoutMs),
                         imageConcurrency: config.imageConcurrency || defaultConfig.imageConcurrency,
                         videoReferenceMode: config.videoReferenceMode === "frames" ? "frames" : "auto",
                     },
@@ -421,6 +421,14 @@ function normalizeApiFormat(apiFormat: unknown): ApiCallFormat {
 
 function normalizeImageDispatchMode(value: unknown): ImageDispatchMode {
     return value === "async" ? "async" : "sync";
+}
+
+function migrateImagePollInterval(value: string | undefined) {
+    return !value || value === "2500" ? defaultConfig.imagePollIntervalMs : value;
+}
+
+function migrateImagePollTimeout(value: string | undefined) {
+    return !value || value === "600000" ? defaultConfig.imagePollTimeoutMs : value;
 }
 
 function normalizeImageResponseFormat(value: unknown): ImageResponseFormat {
