@@ -1,5 +1,6 @@
 import axios from "axios";
 
+import i18n from "@/i18n";
 import { dataUrlToFile } from "@/lib/image-utils";
 import { getMediaBlob, uploadMediaFile, type UploadedFile } from "@/services/file-storage";
 import { imageToDataUrl } from "@/services/image-storage";
@@ -67,6 +68,7 @@ const OPENAI_VIDEO_MAX_ATTEMPTS = 360;
 const MANAGED_VIDEO_ORIGIN = "https://video.52token.org";
 const EDGE_VIDEO_PATH_PREFIX = "/v1/video-content/";
 const pluginVideoResults = new Map<string, VideoGenerationResult>();
+const apiText = (key: string) => i18n.t(`apiErrors.${key}`);
 
 export class VideoGenerationTerminalError extends Error {
     constructor(
@@ -925,6 +927,7 @@ function readAxiosError(error: unknown, fallback: string) {
     if (axios.isCancel(error)) return "请求已取消";
     let message = fallback;
     if (axios.isAxiosError<{ error?: { message?: string }; msg?: string; code?: number }>(error)) {
+        if (!error.response && error.code === "ERR_NETWORK") return apiText("corsRequired");
         const responseData = error.response?.data;
         message = responseData?.msg || responseData?.error?.message || statusMessage(error.response?.status, fallback);
     } else if (error instanceof DOMException && error.name === "AbortError") {
